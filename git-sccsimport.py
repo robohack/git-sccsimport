@@ -6,6 +6,8 @@
 # Copyright: 2008 James Youngman <jay@gnu.org>
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
+# Additional Author: Greg A. Woods <woods@robohack.ca>
+#
 # ToDo:
 #
 # - add "--expand-kw" option
@@ -37,6 +39,8 @@
 #     - or does the last rev's timestamp suffice?
 #
 #   - how does this interact with branches or does it matter?
+#
+# - auto-create a new tag whenever the release level increases (vSID?)
 #
 """A fast git importer for SCCS files.
 
@@ -90,6 +94,7 @@ MAIL_DOMAIN = None
 # location.  (mostly a special case for me, but perhaps others have moved too)
 #
 TIMEZONE = None
+UTC_OFFSET = datetime.datetime.utcnow() - datetime.datetime.now()
 
 UNIX_EPOCH = time.mktime(datetime.datetime(1970, 1, 1,
 					   0, 0, 0, 0,
@@ -398,6 +403,7 @@ class Delta(object):
 		dt = datetime.datetime(year, month, monthday,
 				       h, m, s,
 				       microsec, TIMEZONE)
+		dt += UTC_OFFSET
 		epoch_offset = time.mktime(dt.timetuple())
 		# We subtract UNIX_EPOCH to take account of the fact
 		# that the system epoch may in fact not be the same as the Unix
@@ -543,6 +549,8 @@ class GitImporter(object):
 
 	def GetUserName(self, login_name):
 		"""Get a user's full name corresponding to the given login name."""
+		if login_name == "woods":
+			return "Greg A. Woods"
 		return login_name
 
 	def GetUserEmailAddress(self, login_name):
