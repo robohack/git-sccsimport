@@ -84,18 +84,6 @@ SCCS_ESCAPE = chr(1)
 #
 MAIL_DOMAIN = None
 
-# XXX the timzone should probably default to the server timezone (i.e. assuming
-# the import is being done on a machine in the same timezone as the original
-# SCCS source server lived.  With the addition of the AuthorMap file ala
-# git-sccsimport then we can also adjust timestamps on a per-author basis.
-#
-# However maybe there could be some option to change the timezone at some date
-# (or list of dates), in order to handle cases where the SCCS files moved
-# location.  (mostly a special case for me, but perhaps others have moved too)
-#
-TIMEZONE = None
-UTC_OFFSET = datetime.datetime.utcnow() - datetime.datetime.now()
-
 UNIX_EPOCH = time.mktime(datetime.datetime(1970, 1, 1,
 					   0, 0, 0, 0,
 					   None).timetuple())
@@ -400,17 +388,34 @@ class Delta(object):
 			else:
 				year += 1900
 
-		dt = datetime.datetime(year, month, monthday,
-				       h, m, s,
-				       microsec, TIMEZONE)
-		dt += UTC_OFFSET
-		epoch_offset = time.mktime(dt.timetuple())
+		cdate = datetime.datetime(year, month, monthday,
+					  h, m, s,
+					  microsec, None)
+		lt = time.mktime(cdate.timetuple())
+		#
+		# XXX the timzone currently defaults to the host's timezone
+		# (i.e. assuming the import is being done on a machine in the
+		# same timezone as the original SCCS source server lived)
+		#
+		# With the addition of the AuthorMap file ala git-sccsimport
+		# then we could also adjust timestamps on a per-author basis,
+		# though that would also probably require use of the magical
+		# third-party "pytz" module.
+		#
+		# Maybe there could also be some option to change the timezone
+		# at some date (or list of dates), in order to handle cases
+		# where the SCCS files moved location.  (mostly a special case
+		# for me, but perhaps others have moved between zones too)
+		#
+		epoch_offset = time.mktime(time.gmtime(lt)) # convert to UTC
+		#
 		# We subtract UNIX_EPOCH to take account of the fact
 		# that the system epoch may in fact not be the same as the Unix
 		# epoch.
 		#
 		# git fast-import requires the timestamp to be measured in
 		# seconds since the Unix epoch.
+		#
 		self._timestamp = epoch_offset - UNIX_EPOCH
 
 	def GitTimestamp(self):
