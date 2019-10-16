@@ -6,8 +6,42 @@
 # Copyright: 2008 James Youngman <jay@gnu.org>
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
-"""
-A fast git importer for SCCS files.
+# ToDo:
+#
+# - add "--expand-kw" option
+#
+# - add AuthorMap support
+#
+#   - (maybe keep MAIL_DOMAIN?)
+#
+# - add controls and defaults for timezones
+#
+# - fix the calling conventions (command-line API) to be more like:
+#
+#	mkdir my-project-converted-to-git
+#       cd my-project-converted-to-git
+#       git init
+#       git-sccsimport $PROJECTDIR [...]
+#
+# - support branches? (how, if, did CSRG use branches? [only about 5 (widely
+#   scattered individual) files in all of 4.4BSD-Alpha have branch numbers,
+#   including init.c and cpio.c]
+#
+# - consider incremental import support
+#
+#	cd my-project-converted-to-git
+#	git-sccsimport --incr $PROJECTDIR [...]
+#
+#   - might keep a rev list ala git-cvsimport (or just last rev?)
+#
+#     - or does the last rev's timestamp suffice?
+#
+#   - how does this interact with branches or does it matter?
+#
+"""A fast git importer for SCCS files.
+
+It will import deltas collectively from groups of SCCS files into a fresh git
+repository using "git fast-import".
 
 How to use this program:
 
@@ -28,6 +62,7 @@ git repository.
 
 I tried this on a 32M code repository in SCCS and it produced a
 36M git repository.
+
 """
 import datetime
 import errno
@@ -42,8 +77,22 @@ import sys
 import time
 
 SCCS_ESCAPE = chr(1)
-TIMEZONE = None
+
+# this will normally not be used -- see the AuthorMap option....
+#
 MAIL_DOMAIN = None
+
+# XXX the timzone should probably default to the server timezone (i.e. assuming
+# the import is being done on a machine in the same timezone as the original
+# SCCS source server lived.  With the addition of the AuthorMap file ala
+# git-sccsimport then we can also adjust timestamps on a per-author basis.
+#
+# However maybe there could be some option to change the timezone at some date
+# (or list of dates), in order to handle cases where the SCCS files moved
+# location.  (mostly a special case for me, but perhaps others have moved too)
+#
+TIMEZONE = None
+
 UNIX_EPOCH = time.mktime(datetime.datetime(1970, 1, 1,
                                            0, 0, 0, 0,
                                            None).timetuple())
@@ -52,7 +101,8 @@ IMPORT_REF = None
 
 # Two checkins separated by more than FUZZY_WINDOW will never be considered part
 # of the same commit; N.B. even if they have the same non-empty comment,
-# commiter, and MRs.  (I.e. this can be a relatively large number, e.g. 1 day.)
+# commiter, and MRs.  (I.e. this can be a relatively large number, e.g. 1 day,
+# or even potentially a much longer time, such as a week.)
 FUZZY_WINDOW = 24.0 * 60.0 * 60.0
 
 
@@ -134,7 +184,8 @@ def GetBody(sfile, seqno, expand_keywords):
     options = ["-p", "-s", ("-a%d" % seqno)]
     if not expand_keywords:
         options.append("-k")
-        options.append(sfile)
+
+    options.append(sfile)
     commandline.extend(options)
     return RunCommand(commandline)
 
@@ -541,7 +592,7 @@ def ImportDeltas(imp, deltas):
             commit_count += 1
             parent = current
         # We're now in a commit.  Emit the body for this delta.
-        body = GetBody(d._sccsfile._filename, d._seqno, False) # XXX expand_keywords
+        body = GetBody(d._sccsfile._filename, d._seqno, True) # XXX expand_keywords
         imp.Filemodify(d._sccsfile, body)
     # Finished looping over deltas
     if parent:
@@ -682,6 +733,16 @@ def ParseOptions(argv):
     parser.add_option("--branch",
                       help="branch to populate",
                       default="master")
+    # XXX this should be "--authors" to set full author names!
+    # The author map should match the format of git-cvsimport:
+    #
+    # <username>=Full Name <email@addre.ss> [time/zone]
+    #
+    # e.g.:
+    #
+    #    exon=Andreas Ericsson <ae@op5.se>
+    #    spawn=Simon Pawn <spawn@frog-pond.org> America/Chicago
+    #
     parser.add_option("--maildomain",
                       help="Mail domain for usernames taken from SCCS files")
     parser.add_option("--fuzzy-commit-window",
@@ -708,6 +769,7 @@ def ParseOptions(argv):
     verbose = options.verbose
     if options.maildomain:
         MAIL_DOMAIN = options.maildomain
+    # XXX this should auto-detect!
     if options.use_sccs:
         GET = "sccs get"
         PRS = "sccs prs"
