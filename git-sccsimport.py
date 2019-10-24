@@ -8,9 +8,21 @@
 #
 # Additional Author: Greg A. Woods <woods@robohack.ca>
 #
-# ToDo:
+# Import this from SCCS to Git with:
 #
-# - add "--expand-kw" option
+#	if [ ! -d /work/woods/g-git-sccsimport/.git ]; then
+#		mkdir -p /work/woods/g-git-sccsimport/.git
+#		cd /work/woods/g-git-sccsimport/.git
+#		git init
+#		git remote add origin git@github.com:robohack/git-sccsimport.git
+#	fi
+#	cd ~/src
+#	git-sccsimport --use-sccs --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\)/s//committer Jay Youngman <jay@gnu.org> 1200826930/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
+#	cd /work/woods/g-git-sccsimport
+#	git push -u origin master
+#
+#
+# ToDo:
 #
 # - add AuthorMap support
 #
@@ -31,6 +43,9 @@
 #
 # - consider incremental import support
 #
+#   - it already essentially works by brute force (full re-import), but it could
+#     be optimized, and with new calling conventions it might work like:
+#
 #	cd my-project-converted-to-git
 #	git-sccsimport --incr $PROJECTDIR [...]
 #
@@ -41,6 +56,7 @@
 #   - how does this interact with branches or does it matter?
 #
 # - auto-create a new tag whenever the release level increases (vSID?)
+#   (in any file?)
 #
 """A fast git importer for SCCS files.
 
@@ -71,6 +87,7 @@ import errno
 import optparse
 import os
 import os.path
+import pwd
 import re
 import resource
 import stat
@@ -231,6 +248,7 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 			   % { 'esc': SCCS_ESCAPE })
 		cmdline = [("-d%s" % fmt), ("-r%s" % sid), filename]
 		propdata = SccsFileQuerySlow.RunPrs(cmdline)
+		#print >>sys.stderr, ("PRS = ", propdata)
 		return propdata.split(SCCS_ESCAPE)
 
 	@staticmethod
@@ -343,6 +361,8 @@ class Delta(object):
 		#		     % (self))
 		#print >>sys.stderr, ("DeltaProperties: comment:%s"
 		#		     % (self._comment))
+		#print >>sys.stderr, ("DeltaProperties: committer:%s"
+		#		     % (self._committer))
 		self._seqno = int(self._seqno)
 		self._parent_seqno = int(self._parent_seqno)
 		if self._comment == "\n":
@@ -554,8 +574,13 @@ class GitImporter(object):
 
 	def GetUserName(self, login_name):
 		"""Get a user's full name corresponding to the given login name."""
-		if login_name == "woods":
-			return "Greg A. Woods"
+		# XXX currently this assumes the users are all local users...
+		# ToDo:  if an authormap is given, search there...  (first or last?)
+		gecos = pwd.getpwnam(login_name).pw_gecos
+		if gecos:
+			username = gecos.split(",")[0]
+			#print >>sys.stderr, ("login %s: '%s'" % (login_name, username))
+			return username
 		return login_name
 
 	def GetUserEmailAddress(self, login_name):
@@ -629,7 +654,7 @@ def ImportDeltas(imp, deltas):
 			parent = current
 
 		# We're now in a commit.  Emit the body for this delta.
-		body = GetBody(d._sccsfile._filename, d._seqno, True) # XXX expand_keywords
+		body = GetBody(d._sccsfile._filename, d._seqno, EXPAND_KEYWORDS)
 		imp.Filemodify(d._sccsfile, body)
 
 	# Finished looping over deltas
@@ -777,6 +802,7 @@ def ParseOptions(argv):
 	global IMPORT_REF
 	global MAIL_DOMAIN
 	global FUZZY_WINDOW
+	global EXPAND_KEYWORDS
 	global verbose
 	parser = optparse.OptionParser()
 	parser.add_option("--branch",
@@ -794,6 +820,8 @@ def ParseOptions(argv):
 	#
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
+	parser.add_option("--expand-kw", default=False, action="store_true",
+			  help="Expand keywords")
 	parser.add_option("--fuzzy-commit-window",
 			  default=FUZZY_WINDOW,
 			  help=("Deltas more than this many seconds apart "
@@ -815,6 +843,7 @@ def ParseOptions(argv):
 				"of directories to automatically search "
 				"rather than a list of SCCS files"))
 	(options, args) = parser.parse_args(argv)
+	EXPAND_KEYWORDS = options.expand_kw
 	verbose = options.verbose
 	if options.maildomain:
 		MAIL_DOMAIN = options.maildomain
@@ -896,3 +925,8 @@ if __name__ == '__main__':
 	rc = main(sys.argv)
 	print >>sys.stderr, using(progname)
 	sys.exit(rc)
+
+# Local Variables:
+# eval: (make-local-variable 'compile-command)
+# compile-command: (concat "cp ./" (file-name-nondirectory (buffer-file-name)) " $HOME/bin/" (file-name-sans-extension (file-name-nondirectory (buffer-file-name))))
+# End:
