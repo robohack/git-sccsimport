@@ -14,10 +14,10 @@
 #		mkdir -p /work/woods/g-git-sccsimport/.git
 #		cd /work/woods/g-git-sccsimport/.git
 #		git init
-#		git remote add origin git@github.com:robohack/git-sccsimport.git
+#		hub create robohack/git-sccsimport
 #	fi
 #	cd ~/src
-#	git-sccsimport --use-sccs --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\)/s//committer Jay Youngman <jay@gnu.org> 1200826930/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
+#	git-sccsimport --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\)/s//committer Jay Youngman <jay@gnu.org> 1200826930/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
 #	cd /work/woods/g-git-sccsimport
 #	git push -u origin master
 #
@@ -95,6 +95,8 @@ import subprocess
 import sys
 import time
 
+from distutils.version import LooseVersion
+
 SCCS_ESCAPE = chr(1)
 
 # this will normally not be used -- see the AuthorMap option....
@@ -111,7 +113,7 @@ IMPORT_REF = None
 # of the same commit; N.B. even if they have the same non-empty comment,
 # commiter, and MRs.  (I.e. this can be a relatively large number, e.g. 1 day,
 # or even potentially a much longer time, such as a week.)
-FUZZY_WINDOW = 24.0 * 60.0 * 60.0
+FUZZY_WINDOW = 24.0 * 60.0 * 60.0 * 7.0
 
 
 verbose = False
@@ -186,9 +188,13 @@ def RunCommand(commandline):
 		msg = ("Failed to run '%s': %s (%s)"
 		       % (commandline[0], oe,
 			  errno.errorcode[oe.errno]))
-		raise ImportFailure, msg
+		#if verbose:
+		#	sys.stderr.write(msg + "\n")
+		raise OSError, msg
 	# for now we'll also just convert CommandFailure to ImportFailure
 	except CommandFailure, cmd_failure:
+		if verbose:
+			print >>sys.stderr, (cmd_failure)
 		raise ImportFailure, cmd_failure
 
 
@@ -258,6 +264,9 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 			return True
 		except ImportFailure:
 			return False
+		except OSError, oe:
+			print >>sys.stderr, ("\nPRS failed: %s" % oe)
+			sys.exit(1)
 
 	@staticmethod
 	def GetRevisionList(filename):
@@ -605,6 +614,15 @@ class GitImporter(object):
 			   % (self.GetUserName(delta._committer),
 			      self.GetUserEmailAddress(delta._committer),
 			      ts))
+
+		# git commit a965bb31166d04f3e5c8f7a93569fb73f9a9d749 added
+		# support for # original-oid in git-fast-import, and "git tag
+		# --contains a965bb31" tells me this will be v2.21.0 or newer:
+		#
+		if LooseVersion(GitVer) >= LooseVersion("v2.21.0"):
+			self.Write("original-oid %s-%s\n"
+				   % (delta._sccsfile._filename, delta._seqno))
+
 		if delta._comment:
 			self.WriteData(delta._comment)
 		else:
@@ -775,7 +793,8 @@ def FindGitDir(gitdir, init):
 			raise ImportFailure, ("cannot locate git repository at %s"
 					      % (gitdir,))
 
-	print >>sys.stderr, ("git repository:", (gitdir,))
+	print >>sys.stderr, ("git repository: %s"
+			     % (gitdir,))
 
 	return gitdir
 
@@ -797,8 +816,6 @@ def MakeDirWorklist(dirs):
 
 
 def ParseOptions(argv):
-	global GET
-	global PRS
 	global IMPORT_REF
 	global MAIL_DOMAIN
 	global FUZZY_WINDOW
@@ -848,13 +865,9 @@ def ParseOptions(argv):
 	if options.maildomain:
 		MAIL_DOMAIN = options.maildomain
 
-	# XXX this should auto-detect!
 	if options.use_sccs:
 		GET = "sccs get"
 		PRS = "sccs prs"
-	else:
-		GET = "get"
-		PRS = "prs"
 
 	try:
 		FUZZY_WINDOW = float(options.fuzzy_commit_window)
@@ -869,6 +882,21 @@ def ParseOptions(argv):
 def main(argv):
 	global progname
 	progname = argv[0] or "git-sccsimport"
+
+	global GitVer
+	GitVer = RunCommand(["git", "--version"]).split(" ")[-1]
+
+	global GET
+	global PRS
+	try:
+		RunCommand("prs".split(" "))
+	except ImportFailure:
+		GET = "get"
+		PRS = "prs"
+	except OSError:
+		GET = "sccs get"
+		PRS = "sccs prs"
+
 	try:
 		options, args = ParseOptions(argv)
 		#print >>sys.stderr, ("Positional args:", " ".join(args))
