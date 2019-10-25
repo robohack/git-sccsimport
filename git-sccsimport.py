@@ -55,6 +55,8 @@
 #
 #   - how does this interact with branches or does it matter?
 #
+# - there probably should be a --quite option to suppress progress info
+#
 # - auto-create a new tag whenever the release level increases (vSID?)
 #   (in any file?)
 #
@@ -431,13 +433,22 @@ class Delta(object):
 		# though that would also probably require use of the magical
 		# third-party "pytz" module.
 		#
+		epoch_offset = time.mktime(time.gmtime(lt)) # convert to UTC
+		#
 		# Maybe there could also be some option to change the timezone
 		# at some date (or list of dates), in order to handle cases
 		# where the SCCS files moved location.  (mostly a special case
-		# for me, but perhaps others have moved between zones too)
+		# for me, but perhaps others have moved between timezones too)
 		#
-		epoch_offset = time.mktime(time.gmtime(lt)) # convert to UTC
+		# On 2010/11/04 I arrived in Kelowna from Toronto, so since then
+		# local timestamps are three hours less than they were, so if
+		# the timestamp is from before that date, then add three hours.
 		#
+		if MoveDate is not None:
+			mvd = time.mktime(MoveDate.timetuple())
+			if lt < mvd:
+				lt += MoveOffset
+
 		# We subtract UNIX_EPOCH to take account of the fact
 		# that the system epoch may in fact not be the same as the Unix
 		# epoch.
@@ -820,7 +831,13 @@ def ParseOptions(argv):
 	global MAIL_DOMAIN
 	global FUZZY_WINDOW
 	global EXPAND_KEYWORDS
+	global MoveDate
+	global MoveOffset
 	global verbose
+
+	MoveDate = None
+	MoveOffset = None
+
 	parser = optparse.OptionParser()
 	parser.add_option("--branch",
 			  help="branch to populate",
@@ -843,12 +860,17 @@ def ParseOptions(argv):
 			  default=FUZZY_WINDOW,
 			  help=("Deltas more than this many seconds apart "
 				"are always considered to be in different commits"))
+	parser.add_option("--move-date",
+			  help=("set the date SCCS files moved between timezones"))
+	parser.add_option("--move-offset",
+			  help=("set number of hours between timezones for --move-date"))
 	parser.add_option("--git-dir",
 			  help="Directory containing the git repository")
 	parser.add_option("--init", default=False, action="store_true",
 			  help="Initialise the git repository first")
 	parser.add_option("--use-sccs", default=False, action="store_true",
-			  help="Use the 'sccs' front-end for SCCS commands")
+			  help=("Use the 'sccs' front-end for SCCS commands "
+				"(by default need for 'sccs' is auto-detected)"))
 	parser.add_option("--verbose", default=False, action="store_true",
 			  help="Print verbose status messages")
 	parser.add_option("--stdout", default=False, action="store_true",
@@ -868,6 +890,19 @@ def ParseOptions(argv):
 	if options.use_sccs:
 		GET = "sccs get"
 		PRS = "sccs prs"
+
+	if options.move_date:
+		if not options.move_offset:
+			raise UsageError("--move-date requires --move-offset")
+		try:
+			MoveDate = datetime.datetime.strptime(options.move_date,
+							      '%Y/%m/%dT%H:%M:%S')
+		except:
+			raise UsageError("Bad --move-date")
+		try:
+			MoveOffset = float(options.move_offset) * 60.0 * 60.0
+		except:
+			raise UsageError("Bad --move-offset")
 
 	try:
 		FUZZY_WINDOW = float(options.fuzzy_commit_window)
