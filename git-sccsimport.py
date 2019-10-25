@@ -7,6 +7,8 @@
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
 # Additional Author: Greg A. Woods <woods@robohack.ca>
+# Copyright: 2019 Greg A. Woods <woods@robohack.ca>
+# License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
 # Import this from SCCS to Git with:
 #
@@ -55,10 +57,7 @@
 #
 #   - how does this interact with branches or does it matter?
 #
-# - there probably should be a --quite option to suppress progress info
-#
-# - auto-create a new tag whenever the release level increases (vSID?)
-#   (in any file?)
+# - there probably should be a --quiet option to suppress progress info
 #
 """A fast git importer for SCCS files.
 
@@ -120,6 +119,7 @@ FUZZY_WINDOW = 24.0 * 60.0 * 60.0 * 7.0
 
 verbose = False
 
+DoTags = True
 
 class ImportFailure(Exception):
 	pass
@@ -462,6 +462,27 @@ class Delta(object):
 		n = int(self._timestamp)
 		return "%d +0000" % (n,)
 
+	def GitComment(self):
+		"""Format a comment, noting any MRs as 'Issue' numbers"""
+		comment = "" # commit comment is mandatory
+		if self._comment:
+			comment = self._comment
+
+		if self._mrs:
+			comment += "\n"
+			comment += "Issue"
+			if len(self._mrs) > 1:
+				comment += "s"
+
+			comment += ": "
+			comment += ", ".join(map(lambda mr: '#' + mr, self._mrs))
+
+		return comment
+
+	def SidLevel(self):
+		return int(self._sid.split(".")[0])
+	def SidRev(self):
+		return int(self._sid.split(".")[1])
 
 class SccsFile(object):
 	def __init__(self, name, *args, **kwargs):
@@ -541,6 +562,7 @@ class GitImporter(object):
 		self._command = None
 		self._importer = None
 		self._write_to_stdout = False
+		self._used_tags = {}
 
 	def StartImporter(self):
 		args = ["git","fast-import"]
@@ -634,15 +656,40 @@ class GitImporter(object):
 			self.Write("original-oid %s-%s\n"
 				   % (delta._sccsfile._filename, delta._seqno))
 
-		if delta._comment:
-			self.WriteData(delta._comment)
-		else:
-			self.WriteData("") # commit comment is mandatory
-
+		self.WriteData(delta.GitComment())
 		if parent:
 			self.Write("from :%d\n" % (parent,))
 
 		return mark
+
+	def WriteTag(self, pdelta, parent):
+		"""Write a new Tag for the new SID level."""
+		# we're tagging the previous release each time we see a new one
+		relno = pdelta.SidLevel() - 1
+		tag = ("v%d" % relno)
+		trev = 0
+		# add a tag "revision" number to avoid cases of "error: multiple
+		# updates for ref 'refs/tags/v18' not allowed" when release
+		# levels are not consistently incremented at release time....
+		if self._used_tags.has_key(tag):
+			self._used_tags[tag] += 1
+			trev = self._used_tags[tag]
+			tag = ("v%d.%d" % (pdelta.SidLevel(), trev))
+		else:
+			self._used_tags[tag] = trev
+
+		if verbose:
+			self.ProgressMsg("\nNEW Tag: %s (for %s: %s)\n"
+					 % (tag, pdelta._sid, pdelta._comment.rstrip()))
+
+		self.Write("tag %s\n" % tag)
+		self.Write("from :%d\n" % (parent,))
+		ts = pdelta.GitTimestamp()
+		self.Write("tagger %s <%s> %s\n"
+			   % (self.GetUserName(pdelta._committer),
+			      self.GetUserEmailAddress(pdelta._committer),
+			      ts))
+		self.WriteData(pdelta.GitComment())
 
 	def Filemodify(self, sfile, body):
 		"""Write a filemodify section of a commit."""
@@ -665,8 +712,11 @@ def ImportDeltas(imp, deltas):
 	first_delta_in_commit = None
 	done = 0
 	imp.ProgressMsg("\nCreating commits...\n")
+	plevel = None
 	parent = None
+	pdelta = None
 	commit_count = 0
+	write_tag_next = False
 	for d in deltas:
 		imp.Progress(done, len(deltas))
 		done += 1
@@ -675,12 +725,22 @@ def ImportDeltas(imp, deltas):
 			if not first_delta_in_commit.SameFuzzyCommit(d):
 				imp.CompleteCommit()
 				first_delta_in_commit = None
+				if DoTags and write_tag_next:
+					imp.WriteTag(plevel, current - 1)
+					write_tag_next = False
+
+				if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
+					write_tag_next = True
 
 		if first_delta_in_commit is None:
 			first_delta_in_commit = d
 			current = imp.BeginCommit(d, parent)
 			commit_count += 1
 			parent = current
+			if pdelta:
+				plevel = d
+
+		pdelta = d
 
 		# We're now in a commit.  Emit the body for this delta.
 		body = GetBody(d._sccsfile._filename, d._seqno, EXPAND_KEYWORDS)
@@ -727,8 +787,10 @@ def Import(filenames, stdout):
 			raise
 
 	imp.Progress(done, len(filenames))
+
 	# Now we have all the metadata; sort the deltas by timestamp
 	# and import the deltas in time order.
+	#
 	delta_list = []
 	for sfile in sccsfiles:
 		for delta in sfile._deltas:
@@ -833,6 +895,7 @@ def ParseOptions(argv):
 	global EXPAND_KEYWORDS
 	global MoveDate
 	global MoveOffset
+	global DoTags
 	global verbose
 
 	MoveDate = None
@@ -854,38 +917,48 @@ def ParseOptions(argv):
 	#
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
+	parser.add_option("--dirs",
+			  action="store_true",
+			  help=("Command-line arguments are a list "
+				"of directories to automatically search "
+				"rather than a list of SCCS files"))
 	parser.add_option("--expand-kw", default=False, action="store_true",
 			  help="Expand keywords")
 	parser.add_option("--fuzzy-commit-window",
 			  default=FUZZY_WINDOW,
 			  help=("Deltas more than this many seconds apart "
 				"are always considered to be in different commits"))
-	parser.add_option("--move-date",
-			  help=("set the date SCCS files moved between timezones"))
-	parser.add_option("--move-offset",
-			  help=("set number of hours between timezones for --move-date"))
 	parser.add_option("--git-dir",
 			  help="Directory containing the git repository")
 	parser.add_option("--init", default=False, action="store_true",
 			  help="Initialise the git repository first")
-	parser.add_option("--use-sccs", default=False, action="store_true",
-			  help=("Use the 'sccs' front-end for SCCS commands "
-				"(by default need for 'sccs' is auto-detected)"))
-	parser.add_option("--verbose", default=False, action="store_true",
-			  help="Print verbose status messages")
+	parser.add_option("--move-date",
+			  help=("set the date SCCS files moved between timezones"
+				" (in ISO8601 form: YYYY/MM/DDTHH:MM:SS)"))
+	parser.add_option("--move-offset",
+			  help=("set the number of hours between timezones for"
+				" --move-date, old to new"))
+	parser.add_option("--no-tags", default=False, action="store_true",
+			  help="Don't try to create tags on SID level bumps.")
 	parser.add_option("--stdout", default=False, action="store_true",
 			  help=("Send git-fast-import data to stdout "
 				"rather than to git-fast-import"))
-	parser.add_option("--dirs",
-			  action="store_true",
-			  help=("Command-line arguments are a list "
-				"of directories to automatically search "
-				"rather than a list of SCCS files"))
+	parser.add_option("--use-sccs", default=False, action="store_true",
+			  help=("Use the 'sccs' front-end for SCCS commands"
+				" (by default need for 'sccs' is auto-detected)"))
+	parser.add_option("--verbose", default=False, action="store_true",
+			  help="Print verbose status messages")
+
 	(options, args) = parser.parse_args(argv)
+
 	EXPAND_KEYWORDS = options.expand_kw
 	verbose = options.verbose
+
 	if options.maildomain:
 		MAIL_DOMAIN = options.maildomain
+
+	if options.no_tags:
+		DoTags = False
 
 	if options.use_sccs:
 		GET = "sccs get"
