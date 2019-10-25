@@ -599,6 +599,12 @@ class GitImporter(object):
 			else:
 				print >>sys.stderr, ("%s completed successfully"
 						     % (self._command,))
+				output = RunCommand(["git",
+						     "--git-dir=%s" % (GitDir,),
+						     "--work-tree=%s" % (os.path.dirname(GitDir),),
+						     "checkout", "master"])
+				if verbose:
+					print >>sys.stderr, ("Result: %s" % output)
 
 	def ProgressMsg(self, msg):
 		"""Emit a progress message for the user."""
@@ -991,6 +997,7 @@ def main(argv):
 	global progname
 	progname = argv[0] or "git-sccsimport"
 
+	global GitDir
 	global GitVer
 	GitVer = RunCommand(["git", "--version"]).split(" ")[-1]
 
@@ -1021,7 +1028,8 @@ def main(argv):
 
 		if not options.stdout:
 			try:
-				os.environ["GIT_DIR"] = FindGitDir(options.git_dir, options.init)
+				GitDir = FindGitDir(options.git_dir, options.init)
+				os.environ["GIT_DIR"] = GitDir
 			except ImportFailure, init_failure:
 				if options.init:
 					action = "initialise"
