@@ -26,10 +26,6 @@
 #
 # ToDo:
 #
-# - add AuthorMap support
-#
-#   - (maybe keep MAIL_DOMAIN?)
-#
 # - add controls and defaults for timezones
 #
 # - fix the calling conventions (command-line API) to be more like:
@@ -39,9 +35,12 @@
 #       git init
 #       git-sccsimport $PROJECTDIR [...]
 #
-# - support branches? (how, if, did CSRG use branches? [only about 5 (widely
+# - support branches? (CSRG did not really use branches [only about 5 (widely
 #   scattered individual) files in all of 4.4BSD-Alpha have branch numbers,
 #   including init.c and cpio.c]
+#
+#   - currently branch deltas just appear in chronological order in the git
+#     commit stream.
 #
 # - consider incremental import support
 #
