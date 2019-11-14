@@ -241,6 +241,11 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 		commandline = PRS.split(" ")
 		commandline.extend(options)
 		return RunCommand(commandline)
+	@staticmethod
+	def RunVal(options):
+		commandline = VAL.split(" ")
+		commandline.extend(options)
+		return RunCommand(commandline)
 
 	@staticmethod
 	def FetchDeltaProperties(sid, filename):
@@ -262,12 +267,12 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 	@staticmethod
 	def IsValidSccsFile(filename):
 		try:
-			output = SccsFileQuerySlow.RunPrs(["-d:F: ", filename])
+			output = SccsFileQuerySlow.RunVal([filename])
 			return True
 		except ImportFailure:
 			return False
 		except OSError, oe:
-			print >>sys.stderr, ("\nPRS failed: %s" % oe)
+			print >>sys.stderr, ("\nVAL failed: %s" % oe)
 			sys.exit(1)
 
 	@staticmethod
@@ -276,13 +281,14 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 		return revisions.split()
 
 
-# XXX this is incomplete!  (see "props" array creation)
+# XXX this is very incomplete!  (see "props" array creation)
 class SccsFileQueryFast(SccsFileQueryBase):
 	"""Extract information from SCCS files by parsing them directly."""
 	DELTA_RE = re.compile("^%cd D ([.0-9]*)" % (SCCS_ESCAPE,))
 
 	@staticmethod
 	def IsValidSccsFile(filename):
+		"""XXX A very incomplete validation of an SCCS file."""
 		try:
 			f = open(filename, "rb")
 			header = f.read(2)
@@ -545,11 +551,11 @@ class SccsFile(object):
 
 	def GoodRevision(self, sid):
 		comps = sid.split(".")
-		if len(comps) > 1:
+		if len(comps) > 1 and all(int(x) > 0 for x in comps):
 			return True
 		else:
 			NotImporting(self._filename, sid,
-				     "SID contains no level component")
+				     "Invalid SID")
 			return False
 
 
@@ -976,6 +982,7 @@ def ParseOptions(argv):
 	if options.use_sccs:
 		GET = "sccs get"
 		PRS = "sccs prs"
+		VAL = "sccs val"
 
 	if options.move_date:
 		if not options.move_offset:
@@ -1013,14 +1020,17 @@ def main(argv):
 
 	global GET
 	global PRS
+	global VAL
 	try:
 		RunCommand("prs".split(" "))
 	except ImportFailure:
 		GET = "get"
 		PRS = "prs"
+		VAL = "val"
 	except OSError:
 		GET = "sccs get"
 		PRS = "sccs prs"
+		VAL = "sccs val"
 
 	try:
 		options, args = ParseOptions(argv)
