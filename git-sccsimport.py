@@ -91,6 +91,7 @@ import pwd
 import re
 import resource
 import stat
+import string
 import subprocess
 import sys
 import time
