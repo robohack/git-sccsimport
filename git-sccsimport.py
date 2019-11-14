@@ -620,23 +620,20 @@ class GitImporter(object):
 			msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail)
 			self.ProgressMsg(msg)
 
-	def GetUserName(self, login_name):
+	def GetUserInfo(self, login_name):
 		"""Get a user's full name corresponding to the given login name."""
-		# XXX currently this assumes the users are all local users...
-		# ToDo:  if an authormap is given, search there...  (first or last?)
-		gecos = pwd.getpwnam(login_name).pw_gecos
-		if gecos:
-			username = gecos.split(",")[0]
-			#print >>sys.stderr, ("login %s: '%s'" % (login_name, username))
-			return username
-		return login_name
-
-	def GetUserEmailAddress(self, login_name):
-		"""Get an email address corresponding to the given login name."""
-		if MAIL_DOMAIN:
-			return "%s@%s" % (login_name, MAIL_DOMAIN)
-		else:
-			return login_name
+		if AuthorMap:
+			return AuthorMap.get(login_name,
+					     "%s <%s@%s>" % (login_name, login_name, MAIL_DOMAIN))
+		try:
+			gecos = pwd.getpwnam(login_name).pw_gecos
+		except:
+			#print >>sys.stderr, ("%s: unknown login" % (login_name,))
+			return "%s <%s@%s>" % (login_name, login_name, MAIL_DOMAIN)
+		username = gecos.split(",")[0]
+		string.replace(username, "&", string.capitalize(login_name))
+		#print >>sys.stderr, ("login %s: '%s'" % (login_name, username))
+		return "%s <%s@%s>" % (username, login_name, MAIL_DOMAIN)
 
 	def WriteData(self, data):
 		"""Emit a data command followd by a blob of data."""
@@ -649,10 +646,8 @@ class GitImporter(object):
 		mark = self.GetNextMark()
 		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark))
 		ts = delta.GitTimestamp()
-		self.Write("committer %s <%s> %s\n"
-			   % (self.GetUserName(delta._committer),
-			      self.GetUserEmailAddress(delta._committer),
-			      ts))
+		self.Write("committer %s %s\n"
+			   % (self.GetUserInfo(delta._committer), ts))
 
 		# git commit a965bb31166d04f3e5c8f7a93569fb73f9a9d749 added
 		# support for # original-oid in git-fast-import, and "git tag
@@ -691,10 +686,8 @@ class GitImporter(object):
 		self.Write("tag %s\n" % tag)
 		self.Write("from :%d\n" % (parent,))
 		ts = pdelta.GitTimestamp()
-		self.Write("tagger %s <%s> %s\n"
-			   % (self.GetUserName(pdelta._committer),
-			      self.GetUserEmailAddress(pdelta._committer),
-			      ts))
+		self.Write("tagger %s %s\n"
+			   % (self.GetUserInfo(pdelta._committer), ts))
 		self.WriteData(pdelta.GitComment())
 
 	def Filemodify(self, sfile, body):
@@ -894,6 +887,16 @@ def MakeDirWorklist(dirs):
 	return result
 
 
+#	return dict(line.strip().split('=') for line in open(filename) if line[0] != '#')
+def GetAuthorMap(filename):
+	map = {}
+	with open(filename, 'r') as fd:
+		for line in fd:
+			if line[0] != '#':
+				(k, v) = line.split('=')
+				map[k.strip()] = v.strip()
+	return map
+
 def ParseOptions(argv):
 	global IMPORT_REF
 	global MAIL_DOMAIN
@@ -903,7 +906,9 @@ def ParseOptions(argv):
 	global MoveOffset
 	global DoTags
 	global verbose
+	global AuthorMap
 
+	AuthorMap = None
 	MoveDate = None
 	MoveOffset = None
 
@@ -923,6 +928,8 @@ def ParseOptions(argv):
 	#
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
+	parser.add_option("--authormap",
+			  help="File mapping author user-IDs to Git style user.{name,email}")
 	parser.add_option("--dirs",
 			  action="store_true",
 			  help=("Command-line arguments are a list "
@@ -982,6 +989,9 @@ def ParseOptions(argv):
 			MoveOffset = float(options.move_offset) * 60.0 * 60.0
 		except:
 			raise UsageError("Bad --move-offset")
+
+	if options.authormap:
+		AuthorMap = GetAuthorMap(options.authormap)
 
 	try:
 		FUZZY_WINDOW = float(options.fuzzy_commit_window)
