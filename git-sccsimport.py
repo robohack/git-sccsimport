@@ -13,13 +13,13 @@
 # Import this from SCCS to Git with:
 #
 #	if [ ! -d /work/woods/g-git-sccsimport/.git ]; then
-#		mkdir -p /work/woods/g-git-sccsimport/.git
-#		cd /work/woods/g-git-sccsimport/.git
+#		mkdir -p /work/woods/g-git-sccsimport
+#		cd /work/woods/g-git-sccsimport
 #		git init
 #		hub create robohack/git-sccsimport
 #	fi
 #	cd ~/src
-#	git-sccsimport --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\)/s//committer Jay Youngman <jay@gnu.org> 1200826930/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
+#	git-sccsimport --tz=-0800 --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\) -0800/s//committer Jay Youngman <jay@gnu.org> 1200826930 +0100/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
 #	cd /work/woods/g-git-sccsimport
 #	git push -u origin master
 #
@@ -397,7 +397,7 @@ class Delta(object):
 
 		assert sidcheck==self._sid
 		self._mrs = mrlist.split()
-		self._ui = GetUserInfo(self._committer)
+		self._ui = GetUserInfo(self._committer, MAIL_DOMAIN, DEFAULT_USER_TZ)
 
 	def SameFuzzyCommit(self, other):
 		#print >>sys.stderr, ("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
@@ -909,7 +909,7 @@ def MakeDirWorklist(dirs):
 # Comment lines, beginning with a '#', are ignored.
 #
 class UserInfo():
-	def __init__(self, login, email, tz = DEFAULT_USER_TZ):
+	def __init__(self, login, email, tz):
 		self.login = login
 		self.email = email
 		self.tz = tz
@@ -945,21 +945,25 @@ def GitUser(username, login_name, mail_domain):
 		return "%s <%s@%s>" % (username, login_name, mail_domain)
 	return "%s <%s>" % (username, login_name)
 
-def GetUserInfo(login_name, mail_domain=MAIL_DOMAIN):
+def GetUserInfo(login_name, mail_domain, tz):
 	"""Get a user's info corresponding to the given login name."""
 	if AuthorMap:
 		return AuthorMap.get(login_name,
-				     UserInfo(login_name, GitUser(login_name, login_name, mail_domain)))
+				     UserInfo(login_name,
+					      GitUser(login_name, login_name, mail_domain),
+					      tz))
 	try:
 		gecos = pwd.getpwnam(login_name).pw_gecos
 	except:
 		if verbose:
 			print >>sys.stderr, ("%s: unknown login" % (login_name,))
 
-		return UserInfo(login_name, GitUser(login_name, login_name, mail_domain))
+		return UserInfo(login_name,
+				GitUser(login_name, login_name, mail_domain),
+				tz)
 	username = gecos.split(",")[0]
 	string.replace(username, "&", string.capitalize(login_name))
-	return UserInfo(login_name, GitUser(username, login_name, mail_domain))
+	return UserInfo(login_name, GitUser(username, login_name, mail_domain), tz)
 
 def ParseOptions(argv):
 	global IMPORT_REF
