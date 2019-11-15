@@ -35,12 +35,20 @@
 #       git init
 #       git-sccsimport $PROJECTDIR [...]
 #
-# - support branches? (CSRG did not really use branches [only about 5 (widely
-#   scattered individual) files in all of 4.4BSD-Alpha have branch numbers,
-#   including init.c and cpio.c]
+# - support branches? (CSRG did not really use branches [only a few somewhat
+#   scattered files in all of 4.4BSD-Alpha have branch numbers, and only a very
+#   few have branch numbers other than "R.L.1.S" (i.e. ".1"), mostly on a few
+#   release and version identifying files in Sendmail.
 #
 #   - currently branch deltas just appear in chronological order in the git
 #     commit stream.
+#
+#   - perhaps we could just commit branch deltas to "br-<filename>-R.L.B" refs
+#     (which are created with a "reset" section)?
+#
+# - can the SCCS "descriptive text" be used and useful in Git?
+#
+# - what to do with the text from any 'm', 'q', and 't' flags?
 #
 # - consider incremental import support
 #
@@ -103,6 +111,8 @@ SCCS_ESCAPE = chr(1)
 # this will normally not be used -- see the AuthorMap option....
 #
 MAIL_DOMAIN = None
+
+DEFAULT_USER_TZ = "+0000"
 
 UNIX_EPOCH = time.mktime(datetime.datetime(1970, 1, 1,
 					   0, 0, 0, 0,
@@ -387,6 +397,7 @@ class Delta(object):
 
 		assert sidcheck==self._sid
 		self._mrs = mrlist.split()
+		self._ui = GetUserInfo(self._committer)
 
 	def SameFuzzyCommit(self, other):
 		#print >>sys.stderr, ("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
@@ -466,7 +477,12 @@ class Delta(object):
 
 	def GitTimestamp(self):
 		n = int(self._timestamp)
-		return "%d +0000" % (n,)
+		# We also pass timezone information from the AuthorMap (or local
+		# timezone) by setting the appropriate <offutc> value here.
+		# N.B. the timestamp must still be in UTC -- <offutc> is only
+		# used to advise formatting of timestamps in log reports and
+		# such.
+		return "%d %s" % (n,self._ui.tz)
 
 	def GitComment(self):
 		"""Format a comment, noting any MRs as 'Issue' numbers"""
@@ -626,21 +642,6 @@ class GitImporter(object):
 			msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail)
 			self.ProgressMsg(msg)
 
-	def GetUserInfo(self, login_name):
-		"""Get a user's full name corresponding to the given login name."""
-		if AuthorMap:
-			return AuthorMap.get(login_name,
-					     "%s <%s@%s>" % (login_name, login_name, MAIL_DOMAIN))
-		try:
-			gecos = pwd.getpwnam(login_name).pw_gecos
-		except:
-			#print >>sys.stderr, ("%s: unknown login" % (login_name,))
-			return "%s <%s@%s>" % (login_name, login_name, MAIL_DOMAIN)
-		username = gecos.split(",")[0]
-		string.replace(username, "&", string.capitalize(login_name))
-		#print >>sys.stderr, ("login %s: '%s'" % (login_name, username))
-		return "%s <%s@%s>" % (username, login_name, MAIL_DOMAIN)
-
 	def WriteData(self, data):
 		"""Emit a data command followd by a blob of data."""
 		self.Write("data %d\n" % (len(data),))
@@ -653,9 +654,9 @@ class GitImporter(object):
 		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark))
 		ts = delta.GitTimestamp()
 		self.Write("committer %s %s\n"
-			   % (self.GetUserInfo(delta._committer), ts))
+			   % (delta._ui.email, ts))
 
-		# git commit a965bb31166d04f3e5c8f7a93569fb73f9a9d749 added
+		# Git's commit a965bb31166d04f3e5c8f7a93569fb73f9a9d749 added
 		# support for # original-oid in git-fast-import, and "git tag
 		# --contains a965bb31" tells me this will be v2.21.0 or newer:
 		#
@@ -693,7 +694,7 @@ class GitImporter(object):
 		self.Write("from :%d\n" % (parent,))
 		ts = pdelta.GitTimestamp()
 		self.Write("tagger %s %s\n"
-			   % (self.GetUserInfo(pdelta._committer), ts))
+			   % (pdelta._ui.email, ts))
 		self.WriteData(pdelta.GitComment())
 
 	def Filemodify(self, sfile, body):
@@ -893,21 +894,79 @@ def MakeDirWorklist(dirs):
 	return result
 
 
-#	return dict(line.strip().split('=') for line in open(filename) if line[0] != '#')
+# The author map should match the format of git-cvsimport:
+#
+# XXX currently the [time/zone] option requires the ISO8601 basic format,
+# i.e. "[+-]hhmm", e.g. "-0800".
+#
+# <username>=Full Name <email@addre.ss> [time/zone]
+#
+# e.g.:
+#
+#	exon=Andreas Ericsson <ae@op5.se>
+#	spawn=Simon Pawn <spawn@frog-pond.org> -0400
+#
+# Comment lines, beginning with a '#', are ignored.
+#
+class UserInfo():
+	def __init__(self, login, email, tz = DEFAULT_USER_TZ):
+		self.login = login
+		self.email = email
+		self.tz = tz
+
 def GetAuthorMap(filename):
 	map = {}
 	with open(filename, 'r') as fd:
 		for line in fd:
-			if line[0] != '#':
-				(k, v) = line.split('=')
-				map[k.strip()] = v.strip()
+			if line[0] == '#':
+				continue
+			(k, v) = line.split('=')
+			v = v.strip()
+			if not v:
+				# ignore usernames with no info
+				continue
+			sp = v.rsplit(None, 1)
+			tz = DEFAULT_USER_TZ
+			if sp[-1].find('/') > -1:
+				tz = FindUTCOffset(sp[-1]) # XXX ToDo ???
+				v = sp[0]
+			elif sp[-1][0] == '+' or sp[-1][0] == '-':
+				assert int(sp[-1])
+				tz = sp[-1]
+				v = sp[0]
+
+			map[k.strip()] = UserInfo(k, v, tz)
+
 	return map
+
+def GitUser(username, login_name, mail_domain):
+	# xxx actually username is optional to git-fast-import too!
+	if mail_domain:
+		return "%s <%s@%s>" % (username, login_name, mail_domain)
+	return "%s <%s>" % (username, login_name)
+
+def GetUserInfo(login_name, mail_domain=MAIL_DOMAIN):
+	"""Get a user's info corresponding to the given login name."""
+	if AuthorMap:
+		return AuthorMap.get(login_name,
+				     UserInfo(login_name, GitUser(login_name, login_name, mail_domain)))
+	try:
+		gecos = pwd.getpwnam(login_name).pw_gecos
+	except:
+		if verbose:
+			print >>sys.stderr, ("%s: unknown login" % (login_name,))
+
+		return UserInfo(login_name, GitUser(login_name, login_name, mail_domain))
+	username = gecos.split(",")[0]
+	string.replace(username, "&", string.capitalize(login_name))
+	return UserInfo(login_name, GitUser(username, login_name, mail_domain))
 
 def ParseOptions(argv):
 	global IMPORT_REF
 	global MAIL_DOMAIN
 	global FUZZY_WINDOW
 	global EXPAND_KEYWORDS
+	global DEFAULT_USER_TZ
 	global MoveDate
 	global MoveOffset
 	global DoTags
@@ -922,18 +981,10 @@ def ParseOptions(argv):
 	parser.add_option("--branch",
 			  help="branch to populate",
 			  default="master")
-	# XXX this should be "--authors" to set full author names!
-	# The author map should match the format of git-cvsimport:
-	#
-	# <username>=Full Name <email@addre.ss> [time/zone]
-	#
-	# e.g.:
-	#
-	#	exon=Andreas Ericsson <ae@op5.se>
-	#	spawn=Simon Pawn <spawn@frog-pond.org> America/Chicago
-	#
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
+	parser.add_option("--tz",
+			  help="Default UTC offset for timestamps (default: %s)" % (DEFAULT_USER_TZ))
 	parser.add_option("--authormap",
 			  help="File mapping author user-IDs to Git style user.{name,email}")
 	parser.add_option("--dirs",
@@ -975,6 +1026,10 @@ def ParseOptions(argv):
 
 	if options.maildomain:
 		MAIL_DOMAIN = options.maildomain
+
+	if options.tz:
+		# xxx verify it is in the correct format!
+		DEFAULT_USER_TZ = options.tz
 
 	if options.no_tags:
 		DoTags = False
@@ -1056,7 +1111,7 @@ def main(argv):
 				else:
 					action = "locate"
 
-				print >>sys.stderr, ("Initialization failed:\n%s" % (init_failure,))
+				print >>sys.stderr, ("Initialisation failed:\n%s" % (init_failure,))
 				return 1
 
 		if options.dirs:
