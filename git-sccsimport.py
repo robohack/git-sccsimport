@@ -46,6 +46,10 @@
 #   - perhaps we could just commit branch deltas to "br-<filename>-R.L.B" refs
 #     (which are created with a "reset" section)?
 #
+# - fuzzy commit comparison would work better if delta sorting was smarter,
+#   e.g. if it could do some kind of "sliding window sort" on the comment text
+#   over a group of commits.
+#
 # - can the SCCS "descriptive text" be used and useful in Git?
 #
 # - what to do with the text from any 'm', 'q', and 't' flags?
@@ -624,7 +628,7 @@ class GitImporter(object):
 				output = RunCommand(["git",
 						     "--git-dir=%s" % (GitDir,),
 						     "--work-tree=%s" % (os.path.dirname(GitDir),),
-						     "checkout", "master"])
+						     "checkout", IMPORT_REF.rsplit('/', 1)[1]])
 				if verbose:
 					print >>sys.stderr, ("Result: %s" % output)
 
@@ -881,6 +885,8 @@ def FindGitDir(gitdir, init):
 def MakeDirWorklist(dirs):
 	result = []
 	for dirname in dirs:
+		# XXX it would be good to be able to report errors herein,
+		# especially permission denied, etc....
 		for root, subdirs, files in os.walk(dirname):
 			for f in files:
 				if f.startswith("s."):
