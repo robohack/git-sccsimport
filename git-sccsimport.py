@@ -2,6 +2,8 @@
 #
 # git-sccsimport -- Import deltas collectively from SCCS files into git
 #
+#ident	"%Z%%Y%:%M%	%I%	%E% %U% (%Q%)"
+#
 # Author: James Youngman <jay@gnu.org>
 # Copyright: 2008 James Youngman <jay@gnu.org>
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
@@ -19,7 +21,7 @@
 #		hub create robohack/git-sccsimport
 #	fi
 #	cd ~/src
-#	git-sccsimport --tz=-0800 --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\) -0800/s//committer Jay Youngman <jay@gnu.org> 1200826930 +0100/' | (cd /work/woods/g-git-sccsimport && git fast-import && git reset --hard HEAD )
+#	git-sccsimport --tz=-0800 --stdout --maildomain=robohack.ca SCCS/s.git-sccsimport.py | gsed '0,/^committer [^0-9]* \([0-9]*\) -0800/s//committer Jay Youngman <jay@gnu.org> 1200826930 +0100/' | (cd /work/woods/g-git-sccsimport && git fast-import && git checkout master -- . )
 #	cd /work/woods/g-git-sccsimport
 #	git push -u origin master
 #
@@ -131,6 +133,7 @@ IMPORT_REF = None
 FUZZY_WINDOW = 24.0 * 60.0 * 60.0 * 7.0
 
 
+debug = False
 verbose = False
 
 DoTags = True
@@ -175,16 +178,16 @@ def ReportCommandFailure(command, returncode, errors):
 		errors = ""
 
 	if returncode < 0:
-		msg = ("%s: killed by signal %s" % command, -(returncode))
+		msg = ("%s: killed by signal %s" % (command, -(returncode),))
 	else:
-		msg = ("%s: returned exit status %d" % (command, returncode))
+		msg = ("%s: returned exit status %d" % (command, returncode,))
 
-	raise CommandFailure, ("%s\n%s" % (errors, msg))
+	raise CommandFailure, ("%s\n%s" % (errors, msg,))
 
 
 def RunCommand(commandline):
 	try:
-		if verbose:
+		if debug:
 			msg = ("Running command: %s\n"
 			       % (" ".join(commandline),))
 			sys.stderr.write(msg)
@@ -199,13 +202,15 @@ def RunCommand(commandline):
 		if child.returncode != 0:
 			ReportCommandFailure(commandline[0], child.returncode, errors)
 		else:
+			if errors and debug:
+				print >>sys.stderr, ("%s stderr: %s" % (commandline[0], errors,))
 			return output
 	except OSError, oe:
 		msg = ("Failed to run '%s': %s (%s)"
 		       % (commandline[0], oe,
 			  errno.errorcode[oe.errno]))
-		#if verbose:
-		#	sys.stderr.write(msg + "\n")
+		if debug:
+			sys.stderr.write(msg + "\n")
 		raise OSError, msg
 	# for now we'll also just convert CommandFailure to ImportFailure
 	except CommandFailure, cmd_failure:
@@ -216,7 +221,7 @@ def RunCommand(commandline):
 
 def GetBody(sfile, seqno, expand_keywords):
 	commandline = GET.split(" ")
-	options = ["-p", "-s", ("-a%d" % seqno)]
+	options = ["-p", "-s", ("-a%d" % (seqno,))]
 	if not expand_keywords:
 		options.append("-k")
 
@@ -273,7 +278,7 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 			   ":MR:%(esc)c"           # 7 MR numbers
 			   ":P:%(esc)c"            # 8 Perpetrator (committer)
 			   % { 'esc': SCCS_ESCAPE })
-		cmdline = [("-d%s" % fmt), ("-r%s" % sid), filename]
+		cmdline = [("-d%s" % (fmt,)), ("-r%s" % (sid,)), filename]
 		propdata = SccsFileQuerySlow.RunPrs(cmdline)
 		#print >>sys.stderr, ("PRS = ", propdata)
 		return propdata.split(SCCS_ESCAPE)
@@ -282,11 +287,12 @@ class SccsFileQuerySlow(SccsFileQueryBase):
 	def IsValidSccsFile(filename):
 		try:
 			output = SccsFileQuerySlow.RunVal([filename])
+			#print >>sys.stderr, ("%s: %s" % (VAL, output,))
 			return True
 		except ImportFailure:
 			return False
 		except OSError, oe:
-			print >>sys.stderr, ("\nVAL failed: %s" % oe)
+			print >>sys.stderr, ("\nVAL failed: %s" % (oe,))
 			sys.exit(1)
 
 	@staticmethod
@@ -382,7 +388,7 @@ class Delta(object):
 		"""Query the properties of this delta from the SCCS file."""
 		props = self._qif.FetchDeltaProperties(self._sid,
 						       self._sccsfile._filename)
-		assert len(props)>1, "%s %s %s" % (self._sccsfile._filename, self._sid, props)
+		assert len(props)>1, "%s %s %s" % (self._sccsfile._filename, self._sid, props,)
 		#print >>sys.stderr, ("DeltaProperties: %s"
 		#		     % (props))
 		self.SetTimestamp(props[0], props[1])
@@ -486,7 +492,7 @@ class Delta(object):
 		# N.B. the timestamp must still be in UTC -- <offutc> is only
 		# used to advise formatting of timestamps in log reports and
 		# such.
-		return "%d %s" % (n,self._ui.tz)
+		return "%d %s" % (n, self._ui.tz,)
 
 	def GitComment(self):
 		"""Format a comment, noting any MRs as 'Issue' numbers"""
@@ -533,7 +539,7 @@ class SccsFile(object):
 		return qif.IsValidSccsFile(filename)
 
 	def __repr__(self):
-		return "SccsFile(r'%s')" % self._filename
+		return "SccsFile(r'%s')" % (self._filename,)
 
 	@staticmethod
 	def GitFriendlyName(name):
@@ -625,12 +631,22 @@ class GitImporter(object):
 			else:
 				print >>sys.stderr, ("%s completed successfully"
 						     % (self._command,))
+
 				output = RunCommand(["git",
 						     "--git-dir=%s" % (GitDir,),
 						     "--work-tree=%s" % (os.path.dirname(GitDir),),
-						     "checkout", IMPORT_REF.rsplit('/', 1)[1]])
-				if verbose:
-					print >>sys.stderr, ("Result: %s" % output)
+						     "gc", "--aggressive"]) # n.b. no --progress option!
+				if output and verbose:
+					print >>sys.stderr, ("git gc: %s" % (output,))
+
+				output = RunCommand(["git",
+						     "--git-dir=%s" % (GitDir,),
+						     "--work-tree=%s" % (os.path.dirname(GitDir),),
+						     "checkout", "--progress",
+						     IMPORT_REF.rsplit('/', 1)[1], "--", "."])
+				if output and verbose:
+					print >>sys.stderr, ("git checkout: %s" % (output,))
+
 
 	def ProgressMsg(self, msg):
 		"""Emit a progress message for the user."""
@@ -643,7 +659,7 @@ class GitImporter(object):
 			tail = " done\n"
 		else:
 			tail = ""
-			msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail)
+			msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail,)
 			self.ProgressMsg(msg)
 
 	def WriteData(self, data):
@@ -655,7 +671,7 @@ class GitImporter(object):
 	def BeginCommit(self, delta, parent):
 		"""Start a new commit (having the indicated parent)."""
 		mark = self.GetNextMark()
-		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark))
+		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark,))
 		ts = delta.GitTimestamp()
 		self.Write("committer %s %s\n"
 			   % (delta._ui.email, ts))
@@ -678,7 +694,7 @@ class GitImporter(object):
 		"""Write a new Tag for the new SID level."""
 		# we're tagging the previous release each time we see a new one
 		relno = pdelta.SidLevel() - 1
-		tag = ("v%d" % relno)
+		tag = ("v%d" % (relno,))
 		trev = 0
 		# add a tag "revision" number to avoid cases of "error: multiple
 		# updates for ref 'refs/tags/v18' not allowed" when release
@@ -686,15 +702,15 @@ class GitImporter(object):
 		if self._used_tags.has_key(tag):
 			self._used_tags[tag] += 1
 			trev = self._used_tags[tag]
-			tag = ("v%d.%d" % (pdelta.SidLevel(), trev))
+			tag = ("v%d.%d" % (pdelta.SidLevel(), trev,))
 		else:
 			self._used_tags[tag] = trev
 
 		if verbose:
 			self.ProgressMsg("\nNEW Tag: %s (for %s: %s)\n"
-					 % (tag, pdelta._sid, pdelta._comment.rstrip()))
+					 % (tag, pdelta._sid, pdelta._comment.rstrip(),))
 
-		self.Write("tag %s\n" % tag)
+		self.Write("tag %s\n" % (tag,))
 		self.Write("from :%d\n" % (parent,))
 		ts = pdelta.GitTimestamp()
 		self.Write("tagger %s %s\n"
@@ -703,7 +719,7 @@ class GitImporter(object):
 
 	def Filemodify(self, sfile, body):
 		"""Write a filemodify section of a commit."""
-		self.Write("M %s inline %s\n" % (sfile.gitmode, sfile.gitname))
+		self.Write("M %s inline %s\n" % (sfile.gitmode, sfile.gitname,))
 		self.WriteData(body)
 
 	def CompleteCommit(self):
@@ -867,8 +883,8 @@ def FindGitDir(gitdir, init):
 			       % (gitdir,))
 			print >>sys.stderr, msg
 			output = RunCommand(["git", "--git-dir=%s" % (gitdir,), "init"])
-			if verbose:
-				print >>sys.stderr, ("Result: %s" % output)
+			if output and verbose:
+				print >>sys.stderr, ("git init: %s" % (output,))
 
 	if not IsValidGitDir(gitdir):
 		gitdir += "/.git"
@@ -948,8 +964,8 @@ def GetAuthorMap(filename):
 def GitUser(username, login_name, mail_domain):
 	# xxx actually username is optional to git-fast-import too!
 	if mail_domain:
-		return "%s <%s@%s>" % (username, login_name, mail_domain)
-	return "%s <%s>" % (username, login_name)
+		return "%s <%s@%s>" % (username, login_name, mail_domain,)
+	return "%s <%s>" % (username, login_name,)
 
 def GetUserInfo(login_name, mail_domain, tz):
 	"""Get a user's info corresponding to the given login name."""
@@ -994,7 +1010,7 @@ def ParseOptions(argv):
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
 	parser.add_option("--tz",
-			  help="Default UTC offset for timestamps (default: %s)" % (DEFAULT_USER_TZ))
+			  help="Default UTC offset for timestamps (default: %s)" % (DEFAULT_USER_TZ,))
 	parser.add_option("--authormap",
 			  help="File mapping author user-IDs to Git style user.{name,email}")
 	parser.add_option("--dirs",
@@ -1026,8 +1042,10 @@ def ParseOptions(argv):
 	parser.add_option("--use-sccs", default=False, action="store_true",
 			  help=("Use the 'sccs' front-end for SCCS commands"
 				" (by default need for 'sccs' is auto-detected)"))
+	parser.add_option("--debug", default=False, action="store_true",
+			  help="Print all commands being run and any stderr output.")
 	parser.add_option("--verbose", default=False, action="store_true",
-			  help="Print verbose status messages")
+			  help="Print more verbose status messages.")
 
 	(options, args) = parser.parse_args(argv)
 
@@ -1117,11 +1135,11 @@ def main(argv):
 				os.environ["GIT_DIR"] = GitDir
 			except ImportFailure, init_failure:
 				if options.init:
-					action = "initialise"
+					action = "Initialisation"
 				else:
-					action = "locate"
+					action = "Locate"
 
-				print >>sys.stderr, ("Initialisation failed:\n%s" % (init_failure,))
+				print >>sys.stderr, ("%s failed:\n%s" % (action, init_failure,))
 				return 1
 
 		if options.dirs:
@@ -1133,10 +1151,10 @@ def main(argv):
 			print >>sys.stderr, "No items to import!"
 			return 1
 
-		if verbose:
-			print >>sys.stderr, ("Importing %d items:" % len(items), " ".join(items))
+		if debug:
+			print >>sys.stderr, ("Importing %d items:" % (len(items),), " ".join(items))
 		else:
-			print >>sys.stderr, ("Importing %d items..." % len(items))
+			print >>sys.stderr, ("Importing %d items..." % (len(items),))
 
 		return Import(items, options.stdout)
 
