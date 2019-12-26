@@ -659,8 +659,9 @@ class GitImporter(object):
 			tail = " done\n"
 		else:
 			tail = ""
-			msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail,)
-			self.ProgressMsg(msg)
+
+		msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail,)
+		self.ProgressMsg(msg)
 
 	def WriteData(self, data):
 		"""Emit a data command followd by a blob of data."""
