@@ -70,6 +70,9 @@
 #
 #   - how does this interact with branches or does it matter?
 #
+#   - this might help in situations where something happens to cause a diverging
+#     path, e.g. a tag is applied in a different place.
+#
 # - there probably should be a --quiet option to suppress progress info
 #
 """A fast git importer for SCCS files.
@@ -88,9 +91,23 @@ First, make sure the SCCS (or CSSC) binaries are on your $PATH.  Then do this:
   git-sccsimport --init --git-dir="$NEWGIT" --dirs .
 
 Notice that git-sccsimport is being run with its working directory as the root
-of the tree of SCCS files.  This is becaue the relative path from your working
-directory to the SCCS file is also used as the name of the file in the resulting
-git repository.
+of the tree of SCCS files.  This is because the relative path from your working
+directory to the SCCS file is also used as the (path)name of the file in the
+resulting git repository.
+
+Since git-sccsimport always does a complete import, and because by default it
+tries to merge commits with the same message text and author, it can create a
+diverging tip if something weird happens between successive imports to the same
+Git repository (e.g. a new matching commit is made, or new tag is implied).
+
+When this happens git-fast-import will warn with a message like the following:
+
+  warning: Not updating refs/heads/master (new tip 6e7cd4a1aea270d27f588e3bed356a657bedd358 does not contain 82b901b23b94919807aef4ac65792ca2bd2f9512)
+
+In this case if you must press on then you can reset your branch to the new tip
+of the import with "git reset --hard <new-tip>".  Note though that this will
+cause other clones to see history being rewritten, but here this is intended and
+any other clones just have to deal with it.
 
 I tried this on a 32M code repository in SCCS and it produced a 36M git
 repository.
