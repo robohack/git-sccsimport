@@ -735,6 +735,10 @@ class GitImporter(object):
 			   % (pdelta._ui.email, ts))
 		self.WriteData(pdelta.GitComment())
 
+	def Filedelete(self, sfile):
+		"""Write a filedelete section of a commit."""
+		self.Write("D %s\n" % (sfile.gitname,))
+
 	def Filemodify(self, sfile, body):
 		"""Write a filemodify section of a commit."""
 		self.Write("M %s inline %s\n" % (sfile.gitmode, sfile.gitname,))
@@ -788,7 +792,10 @@ def ImportDeltas(imp, deltas):
 
 		# We're now in a commit.  Emit the body for this delta.
 		body = GetBody(d._sccsfile._filename, d._seqno, EXPAND_KEYWORDS)
-		imp.Filemodify(d._sccsfile, body)
+		if len(body) == 0:
+			imp.Filedelete(d._sccsfile)
+		else:
+			imp.Filemodify(d._sccsfile, body)
 
 	# Finished looping over deltas
 	if parent:
