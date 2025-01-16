@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # git-sccsimport -- Import deltas collectively from SCCS files into git
 #
@@ -9,7 +9,7 @@
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
 # Additional Author: Greg A. Woods <woods@robohack.ca>
-# Copyright: 2019 Greg A. Woods <woods@robohack.ca>
+# Copyright: 2025 Greg A. Woods <woods@robohack.ca>
 # License: GNU GPL version 2 or later <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
 #
 # Import this from SCCS to Git with:
@@ -52,7 +52,8 @@
 #   e.g. if it could do some kind of "sliding window sort" on the comment text
 #   over a group of commits.
 #
-# - can the SCCS "descriptive text" be used and useful in Git?
+# - can the SCCS "descriptive text" (:FD:) be used and useful in Git? (store it
+#   in a special attribute?)
 #
 # - what to do with the text from any 'm', 'q', and 't' flags?
 #
@@ -109,8 +110,11 @@ of the import with "git reset --hard <new-tip>".  Note though that this will
 cause other clones to see history being rewritten, but here this is intended and
 any other clones just have to deal with it.
 
-I tried this on a 32M code repository in SCCS and it produced a 36M git
-repository.
+This program has been used to convert the 12,613 valid SCCS files in the UCB
+CSRG BSD archives, reading 105,024 deltas, creating 53,991 Git commits.  The
+python-3.9 process ran at about 150MB resident (205MB total), and with the "new"
+fast (direct header parsing) method it completed in just under 18 minutes (on an
+8 vCPU, 22GB, Xen VM on Dell PE2950 with Intel Xeon E5440 CPUs @ 2.83GHz).
 
 """
 import datetime
@@ -127,9 +131,9 @@ import subprocess
 import sys
 import time
 
-from distutils.version import LooseVersion
+from operator import itemgetter
 
-SCCS_ESCAPE = chr(1)
+SCCS_ESCAPE = ord(b'\x01')	# <CTRL-A>
 
 # this will normally not be used -- see the AuthorMap option....
 #
@@ -170,8 +174,8 @@ class AbstractClassError(Exception):
 
 def Usage(who, retval, f, e):
 	if e:
-		print >>f, e
-		print >>f, ("usage: %s sccs-file [sccs-file...]" % (who,))
+		print(e, file=f)
+		print(("usage: %s sccs-file [sccs-file...]" % (who,)), file=f)
 
 	if retval:
 		sys.exit(retval)
@@ -187,7 +191,7 @@ def NotImporting(file, sid, reason):
 		msg = ("%s: not importing this file: %s"
 		       % (file, reason))
 
-	print >>sys.stderr, msg
+	print(msg, file=sys.stderr)
 
 
 def ReportCommandFailure(command, returncode, errors):
@@ -199,10 +203,10 @@ def ReportCommandFailure(command, returncode, errors):
 	else:
 		msg = ("%s: returned exit status %d" % (command, returncode,))
 
-	raise CommandFailure, ("%s\n%s" % (errors, msg,))
+	raise CommandFailure("%s\n%s" % (errors, msg,))
 
 
-def RunCommand(commandline):
+def RunCommand(commandline, text=True):
 	try:
 		if debug:
 			msg = ("Running command: %s\n"
@@ -210,6 +214,7 @@ def RunCommand(commandline):
 			sys.stderr.write(msg)
 
 		child = subprocess.Popen(commandline,
+					 text=text,
 					 close_fds = True,
 					 stdin =subprocess.PIPE,
 					 stdout=subprocess.PIPE,
@@ -220,21 +225,42 @@ def RunCommand(commandline):
 			ReportCommandFailure(commandline[0], child.returncode, errors)
 		else:
 			if errors and debug:
-				print >>sys.stderr, ("%s stderr: %s" % (commandline[0], errors,))
+				print(("%s stderr: %s" % (commandline[0], errors,)), file=sys.stderr)
 			return output
-	except OSError, oe:
+	except OSError as oe:
 		msg = ("Failed to run '%s': %s (%s)"
 		       % (commandline[0], oe,
 			  errno.errorcode[oe.errno]))
 		if debug:
 			sys.stderr.write(msg + "\n")
-		raise OSError, msg
+		raise OSError(msg)
 	# for now we'll also just convert CommandFailure to ImportFailure
-	except CommandFailure, cmd_failure:
+	except CommandFailure as cmd_failure:
 		if verbose:
-			print >>sys.stderr, (cmd_failure)
-		raise ImportFailure, cmd_failure
+			print((cmd_failure), file=sys.stderr)
+		raise ImportFailure(cmd_failure)
 
+
+def RunPrs(options):
+	commandline = PRS.split(" ")
+	commandline.extend(options)
+	return RunCommand(commandline)
+
+def RunVal(options):
+	commandline = VAL.split(" ")
+	commandline.extend(options)
+	return RunCommand(commandline)
+
+def IsValidSccsFile(filename):
+	try:
+		output = RunVal([filename])
+		#print(("%s: %s" % (VAL, output,)), file=sys.stderr)
+		return True
+	except ImportFailure:
+		return False
+	except OSError as oe:
+		print(("\nVAL failed: %s" % (oe,)), file=sys.stderr)
+		sys.exit(1)
 
 def GetBody(sfile, seqno, expand_keywords):
 	commandline = GET.split(" ")
@@ -244,148 +270,183 @@ def GetBody(sfile, seqno, expand_keywords):
 
 	options.append(sfile)
 	commandline.extend(options)
-	return RunCommand(commandline)
+	return RunCommand(commandline, text=False)
 
 
 def FileMode(filename):
 	return stat.S_IMODE(os.stat(filename).st_mode)
 
 
-class SccsFileQueryBase(object):
+def HeaderLines(filename):
+	"""Extract all the header lines from an SCCS file, as per sccsfile(5)."""
+	header_end = b"^%cT" % (SCCS_ESCAPE,)
+	result = []
+	try:
+		f = open(filename, "rb")
+		for line in f.readlines():
+			if line[0] == SCCS_ESCAPE and line[1] == ord(b'T'): # and line[2] == '\n'
+				result.append(line)
+				break
+			else:
+				result.append(line)
+		return result
+
+	finally:
+		f.close()
+
+
+class SccsFileQuerySlow():
+	"""Extract information from SCCS files by running prs(1).
+
+	This is now only used for testing -- it is significantly slower than
+	SccsFileQueryFast() as it requires running a separate PRS command for
+	every SID.
+
+	(SccsFileQueryBase is ignored.)
+
+	"""
 	@staticmethod
-	def HeaderLines(filename):
-		header_end = "^%cT" % (SCCS_ESCAPE,)
-		result = []
-		try:
-			f = open(filename, "rb")
-			for line in f.readlines():
-				if line.startswith(header_end):
-					break
-				else:
-					result.append(line)
-
-			return result
-
-		finally:
-			f.close()
-
-
-class SccsFileQuerySlow(SccsFileQueryBase):
-	"""Extract information from SCCS files by running prs."""
-	@staticmethod
-	def RunPrs(options):
-		commandline = PRS.split(" ")
-		commandline.extend(options)
-		return RunCommand(commandline)
-	@staticmethod
-	def RunVal(options):
-		commandline = VAL.split(" ")
-		commandline.extend(options)
-		return RunCommand(commandline)
-
-	@staticmethod
-	def FetchDeltaProperties(sid, filename):
-		fmt = (":Dy:/:Dm:/:Dd:%(esc)c"  # 0 delta creation date
-			   ":Th:::Tm:::Ts:%(esc)c" # 1 delta creation time (24h)
-			   ":C:%(esc)c"            # 2 checkin comments
-			   ":DS:%(esc)c"           # 3 seqno
-			   ":DP:%(esc)c"           # 4 parent seqno
-			   ":DT:%(esc)c"           # 5 delta type (R or D)
-			   ":I:%(esc)c"            # 6 SID
-			   ":MR:%(esc)c"           # 7 MR numbers
-			   ":P:%(esc)c"            # 8 Perpetrator (committer)
-			   % { 'esc': SCCS_ESCAPE })
-		cmdline = [("-d%s" % (fmt,)), ("-r%s" % (sid,)), filename]
-		propdata = SccsFileQuerySlow.RunPrs(cmdline)
-		#print >>sys.stderr, ("PRS = ", propdata)
-		return propdata.split(SCCS_ESCAPE)
+	def FetchDeltaProperties(sid, sccsfile):
+		fmt = (":Dy:/:Dm:/:Dd:%(esc)c" # 0 delta creation date
+		       ":Th:::Tm:::Ts:%(esc)c" # 1 delta creation time (24h)
+		       ":C:%(esc)c"            # 2 checkin comments
+		       ":DS:%(esc)c"           # 3 seqno
+		       ":DP:%(esc)c"           # 4 parent seqno
+		       ":DT:%(esc)c"           # 5 delta type (R or D)
+		       ":I:%(esc)c"            # 6 SID
+		       ":MR:%(esc)c"           # 7 MR numbers
+		       ":P:"                   # 8 Perpetrator (committer)
+		       % { 'esc': chr(1) })    # <CTRL-A> as separator
+		cmdline = [("-d%s" % (fmt,)), ("-r%s" % (sid,)), sccsfile.filename]
+		propdata = SccsFileQuerySlow.RunPrs(cmdline).rstrip('\n')
+		#print(("PRSout: ", propdata),  file=sys.stderr)
+		#print(("props: %s" % (propdata.split(chr(1)),)), file=sys.stderr)
+		return propdata.split(chr(1))
 
 	@staticmethod
-	def IsValidSccsFile(filename):
-		try:
-			output = SccsFileQuerySlow.RunVal([filename])
-			#print >>sys.stderr, ("%s: %s" % (VAL, output,))
-			return True
-		except ImportFailure:
-			return False
-		except OSError, oe:
-			print >>sys.stderr, ("\nVAL failed: %s" % (oe,))
-			sys.exit(1)
-
-	@staticmethod
-	def GetRevisionList(filename):
+	def GetRevisionList(filename, headerlines):
 		revisions = SccsFileQuerySlow.RunPrs(["-d:I: ", "-e", filename])
 		return revisions.split()
 
+	# "Arbitrary text surrounded by the bracketing lines @t and @T.  This
+	# comments section typically will contain a description of the file's
+	# purpose."
+	#
+	# (xxx not yet used)
+	#
+	@staticmethod
+	def GetFileDesc(filename, headerlines):
+		desc = SccsFileQuerySlow.RunPrs(["-d:FD: ", filename])
 
-# XXX this is very incomplete!  (see "props" array creation)
-class SccsFileQueryFast(SccsFileQueryBase):
-	"""Extract information from SCCS files by parsing them directly."""
-	DELTA_RE = re.compile("^%cd D ([.0-9]*)" % (SCCS_ESCAPE,))
+		if desc == "none": # xxx need to trim to ignore newlines?
+			return ""
+		else:
+			return desc
+
+
+class SccsFileQueryFast():
+	"""Extract information from SCCS files.
+
+	(Parses SCCS files directly, as per sccsfile(5).)
+
+	"""
+	sid_key = b'%cd D ' % (SCCS_ESCAPE,) # ignore removed (R) deltas
 
 	@staticmethod
-	def IsValidSccsFile(filename):
-		"""XXX A very incomplete validation of an SCCS file."""
-		try:
-			f = open(filename, "rb")
-			header = f.read(2)
-			return header[0] == SCCS_ESCAPE and header[1] == 'h'
-		finally:
-			f.close()
-
-	@staticmethod
-	def GetRevisionList(filename):
+	def GetRevisionList(filename, headerlines):
 		result = []
-		header_end = "^%cT" % (SCCS_ESCAPE,)
-		for line in SccsFileQueryBase.HeaderLines(filename):
-			m = SccsFileQueryFast.DELTA_RE.match(line)
-			if m:
-				result.append(m.group(1))
+		for line in headerlines:
+			if line.startswith(SccsFileQueryFast.sid_key):
+				fields = line.split()
+				result.append(fields[2].decode())
+
+		return result
+
+	# "Arbitrary text surrounded by the bracketing lines @t and @T.  This
+	# comments section typically will contain a description of the file's
+	# purpose."  PRS uses ":FD:" as the keyword to print this.
+	#
+	# (xxx not yet used)
+	#
+	@staticmethod
+	def GetFileDesc(filename, headerlines):
+		result = []
+		for line in headerlines:
+			if line[1] == 't':
+				started = True
+				continue
+			if line[1] == 'T':
+				break
+			if started:
+				result.append(line)
 
 		return result
 
 	@staticmethod
-	def FetchDeltaProperties(sid, filename):
+	def FetchDeltaProperties(sid, sccsfile):
 		found = False
 		props = []
 		comments = []
-		comment_leader = "%cc" % (SCCS_ESCAPE,)
-		for line in SccsFileQueryBase.HeaderLines(filename):
-			if not found:
-				m = SccsFileQueryFast.DELTA_RE.match(line)
-				if m and (sid == m.group(1)):
+		MRs = []
+		comment_key = b'%cc ' % (SCCS_ESCAPE,)
+		MR_key = b'%cm ' % (SCCS_ESCAPE,)
+		delta_end_key = b'%ce' % (SCCS_ESCAPE,)
+
+		for line in sccsfile.headerlines:
+			if not found and line.startswith(SccsFileQueryFast.sid_key):
+				#
+				# xxx note we're decoding lines from bytes to
+				# strings as UTF-8, but maybe we should use a
+				# different input encoding?
+				#
+				line = line.decode().rstrip('\n')
+				#print(("line: ", line), file=sys.stderr)
+				fields = line.split()
+				#print(("fields: %s" % (fields,)), file=sys.stderr)
+				if fields[2] == sid:
 					found = True
-					fields = line.split()
 					props = [ fields[3], # 0 creation date
 						  fields[4], # 1 creation time
-						  None,      # XXX 2 checkin comment
+						  None,      # 2 checkin comment (see else:)
 						  fields[6], # 3 seqno
 						  fields[7], # 4 parent seqno
-						  'D',       # XXX 5 delta type (R or D)
+						  fields[1], # 5 delta type (R or D, but always D)
 						  fields[2], # 6 SID
-						  "",        # XXX 7 MR list
+						  None,      # 7 MR list (see else:)
 						  fields[5], # 8 Perpetrator (committer)
-						  "yodel"    # XXX ???
 					]
 					continue
-				else:
-					if found:
-						if line.startswith(comment_leader):
-							comments.append(line[3:])
-						else:
-							break
+			if found:
+				if line.startswith(comment_key):
+					#print(("comment: %s" % (line,)), file=sys.stderr)
+					comments.append(line[3:].decode())
+				elif line.startswith(MR_key):
+					#print(("MR: %s" % (line,)), file=sys.stderr)
+					MRs.append(line[3:].decode())
+				elif line.startswith(delta_end_key):
+					break
 
 		if found:
-			props[2] = "\n".join(comments)
-			# print >>sys.stderr, "props: %s" % (props,)
+			#print(("comments: %s" % (comments,)), file=sys.stderr)
+			props[2] = "".join(comments)
+			#print(("MRs: ", MRs), file=sys.stderr)
+			#
+			# MRs are collected as a newline-separated list of numbers
+			# because that's what PRS gives us in the slow version.
+			#
+			props[7] = "".join(MRs)
+
+			#print(("props: %s" % (props,)), file=sys.stderr)
 			return props
 		else:
+			# xxx should probably be an assert -- we found it once already!
+			#print(("%s: sid: %s: NOT FOUND" % (sccsfile.filename,sid,)), file=sys.stderr)
 			return None
 
 
 def SccsFileQuery():
-	"""Factory method for objects that query SccsFileQuery objects"""
-	return SccsFileQuerySlow()
+	"""Factory method for objects that query SccsFileQuery objects -- Slow or Fast"""
+	return SccsFileQueryFast()
 
 
 class Delta(object):
@@ -404,19 +465,12 @@ class Delta(object):
 	def FetchDeltaProperties(self):
 		"""Query the properties of this delta from the SCCS file."""
 		props = self._qif.FetchDeltaProperties(self._sid,
-						       self._sccsfile._filename)
+						       self._sccsfile)
 		assert len(props)>1, "%s %s %s" % (self._sccsfile._filename, self._sid, props,)
-		#print >>sys.stderr, ("DeltaProperties: %s"
-		#		     % (props))
 		self.SetTimestamp(props[0], props[1])
 		(self._comment, self._seqno, self._parent_seqno, self._type,
-		 sidcheck, mrlist, self._committer, _) = props[2:]
-		#print >>sys.stderr, ("DeltaProperties: %s"
-		#		     % (self))
-		#print >>sys.stderr, ("DeltaProperties: comment:%s"
-		#		     % (self._comment))
-		#print >>sys.stderr, ("DeltaProperties: committer:%s"
-		#		     % (self._committer))
+		 sidcheck, mrlist, self._committer) = props[2:]
+		#print(("DeltaProperties: %s" % (self)), file=sys.stderr)
 		self._seqno = int(self._seqno)
 		self._parent_seqno = int(self._parent_seqno)
 		if self._comment == "\n":
@@ -427,8 +481,8 @@ class Delta(object):
 		self._ui = GetUserInfo(self._committer, MAIL_DOMAIN, DEFAULT_USER_TZ)
 
 	def SameFuzzyCommit(self, other):
-		#print >>sys.stderr, ("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
-		#		     % (self, other))
+		#print(("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
+		#		     % (self, other)), file=sys.stderr)
 		if self._comment != other._comment:
 			return False
 		elif self._committer != other._committer:
@@ -446,13 +500,13 @@ class Delta(object):
 		try:
 			year, month, monthday = [int(f) for f in checkin_date.split("/")]
 		except ValueError:
-			raise ImportFailure, ("Unexpected date format: %s"
-					      % (checkin_date,))
+			raise ImportFailure("Unexpected date format: %s"
+					    % (checkin_date,))
 		try:
 			h,m,s = [int(f) for f in checkin_time.split(":")]
 		except ValueError:
-			raise ImportFailure, ("Unexpected time format: %s"
-					      % (checkin_time,))
+			raise ImportFailure("Unexpected time format: %s"
+					    % (checkin_time,))
 		microsec = 0
 
 		if year < 100:
@@ -514,6 +568,7 @@ class Delta(object):
 	def GitComment(self):
 		"""Format a comment, noting any MRs as 'Issue' numbers"""
 		comment = "" # commit comment is mandatory
+
 		if self._comment:
 			comment = self._comment
 
@@ -522,7 +577,6 @@ class Delta(object):
 			comment += "Issue"
 			if len(self._mrs) > 1:
 				comment += "s"
-
 			comment += ": "
 			comment += ", ".join(map(lambda mr: '#' + mr, self._mrs))
 
@@ -537,11 +591,12 @@ class SccsFile(object):
 	def __init__(self, name, *args, **kwargs):
 		super(SccsFile, self).__init__(*args, **kwargs)
 		self._filename = name
+		self._headerlines = HeaderLines(name)
 		qif = SccsFileQuery()
-		revisions = filter(self.GoodRevision, qif.GetRevisionList(name))
+		revisions = filter(self.GoodRevision, qif.GetRevisionList(name, self._headerlines))
 		self._deltas = [Delta(self, sid, qif) for sid in revisions]
 		self._gitname = self.GitFriendlyName(self._GottenName())
-		if FileMode(self._filename) & 0111:
+		if FileMode(self._filename) & 0o111:
 			self._gitmode = "755"
 		else:
 			self._gitmode = "644"
@@ -549,11 +604,8 @@ class SccsFile(object):
 	gitname = property(lambda self: self._gitname)
 	gitmode = property(lambda self: self._gitmode)
 	filename = property(lambda self: self._filename)
-
-	@staticmethod
-	def IsValidSccsFile(filename):
-		qif = SccsFileQuery()
-		return qif.IsValidSccsFile(filename)
+	headerlines = property(lambda self: self._headerlines)
+	deltas = property(lambda self: self._deltas)
 
 	def __repr__(self):
 		return "SccsFile(r'%s')" % (self._filename,)
@@ -567,7 +619,7 @@ class SccsFile(object):
 
 		"""
 		if os.path.isabs(name):
-			raise ImportFailure, "%s is an absolute path name" % (name,)
+			raise ImportFailure("%s is an absolute path name" % (name,))
 		drive, path = os.path.splitdrive(name)
 		return os.path.normpath(path)
 
@@ -631,13 +683,20 @@ class GitImporter(object):
 		self._next_mark += 1
 		return result
 
-	def Write(self, s):
+	def Write(self, s, enc=True):
 		"""Write some data to the importer."""
 		if self._write_to_stdout:
-			sys.stdout.write(s)
+			# xxx stdout is open in text mode (?)
+			sys.stdout.buffer.write(s.encode() if enc else s)
 		else:
 			assert self._importer
-			self._importer.stdin.write(s)
+			self._importer.stdin.write(s.encode() if enc else s)
+
+	def WriteData(self, data, enc=True):
+		"""Emit a data command followd by a blob of data."""
+		self.Write("data %d\n" % (len(data),))
+		self.Write(data, enc=enc)
+		self.Write("\n")
 
 	def Done(self):
 		if self._importer:
@@ -646,15 +705,15 @@ class GitImporter(object):
 			if returncode != 0:
 				ReportCommandFailure(self._command, returncode, None)
 			else:
-				print >>sys.stderr, ("%s completed successfully"
-						     % (self._command,))
+				print(("%s completed successfully"
+						     % (self._command,)), file=sys.stderr)
 
 				output = RunCommand(["git",
 						     "--git-dir=%s" % (GitDir,),
 						     "--work-tree=%s" % (os.path.dirname(GitDir),),
 						     "gc", "--aggressive"]) # n.b. no --progress option!
 				if output and verbose:
-					print >>sys.stderr, ("git gc: %s" % (output,))
+					print(("git gc: %s" % (output,)), file=sys.stderr)
 
 				output = RunCommand(["git",
 						     "--git-dir=%s" % (GitDir,),
@@ -662,7 +721,7 @@ class GitImporter(object):
 						     "checkout", "--progress",
 						     IMPORT_REF.rsplit('/', 1)[1], "--", "."])
 				if output and verbose:
-					print >>sys.stderr, ("git checkout: %s" % (output,))
+					print(("git checkout: %s" % (output,)), file=sys.stderr)
 
 
 	def ProgressMsg(self, msg):
@@ -680,27 +739,28 @@ class GitImporter(object):
 		msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail,)
 		self.ProgressMsg(msg)
 
-	def WriteData(self, data):
-		"""Emit a data command followd by a blob of data."""
-		self.Write("data %d\n" % (len(data),))
-		self.Write(data)
-		self.Write("\n")
-
 	def BeginCommit(self, delta, parent):
 		"""Start a new commit (having the indicated parent)."""
 		mark = self.GetNextMark()
 		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark,))
-		ts = delta.GitTimestamp()
-		self.Write("committer %s %s\n"
-			   % (delta._ui.email, ts))
 
+		# include an "original-oid" in the stream
+		#
+		# "fast-import will simply ignore this directive, but filter
+		# processes which operate on and modify the stream before
+		# feeding to fast-import may have uses for this information"
+		#
 		# Git's commit a965bb31166d04f3e5c8f7a93569fb73f9a9d749 added
 		# support for # original-oid in git-fast-import, and "git tag
 		# --contains a965bb31" tells me this will be v2.21.0 or newer:
 		#
-		if LooseVersion(GitVer) >= LooseVersion("v2.21.0"):
-			self.Write("original-oid %s-%s\n"
-				   % (delta._sccsfile._filename, delta._seqno))
+		if tuple(GitVer.split(".")) >= tuple("2.21.0".split(".")):
+			self.Write("original-oid %s-%s-%s\n"
+				   % (delta._sccsfile._filename, delta._sid, delta._seqno))
+
+		ts = delta.GitTimestamp()
+		self.Write("committer %s %s\n"
+			   % (delta._ui.email, ts))
 
 		self.WriteData(delta.GitComment())
 		if parent:
@@ -717,7 +777,7 @@ class GitImporter(object):
 		# add a tag "revision" number to avoid cases of "error: multiple
 		# updates for ref 'refs/tags/v18' not allowed" when release
 		# levels are not consistently incremented at release time....
-		if self._used_tags.has_key(tag):
+		if tag in self._used_tags:
 			self._used_tags[tag] += 1
 			trev = self._used_tags[tag]
 			tag = ("v%d.%d" % (pdelta.SidLevel(), trev,))
@@ -742,7 +802,7 @@ class GitImporter(object):
 	def Filemodify(self, sfile, body):
 		"""Write a filemodify section of a commit."""
 		self.Write("M %s inline %s\n" % (sfile.gitmode, sfile.gitname,))
-		self.WriteData(body)
+		self.WriteData(body, enc=False)
 
 	def CompleteCommit(self):
 		"""Write the final part of a commit."""
@@ -756,7 +816,7 @@ class GitImporter(object):
 
 def ImportDeltas(imp, deltas):
 	if not deltas:
-		raise ImportFailure, "No deltas to import"
+		raise ImportFailure("No deltas to import")
 	first_delta_in_commit = None
 	done = 0
 	imp.ProgressMsg("\nCreating commits...\n")
@@ -803,8 +863,8 @@ def ImportDeltas(imp, deltas):
 
 	imp.Progress(done, len(deltas))
 	imp.ProgressMsg("\nDone.\n")
-	print >>sys.stderr, ("%d SCCS deltas in %d git commits"
-			     % (len(deltas), commit_count))
+	print(("%d SCCS deltas in %d git commits"
+			     % (len(deltas), commit_count)), file=sys.stderr)
 
 
 def Import(filenames, stdout):
@@ -812,10 +872,10 @@ def Import(filenames, stdout):
 	for filename in filenames:
 		if not os.access(filename, os.R_OK):
 			msg = "%s is not readable" % (filename,)
-			raise ImportFailure, msg
+			raise ImportFailure(msg)
 		if not os.path.isfile(filename):
 			msg = "%s is not a file" % (filename,)
-			raise ImportFailure, msg
+			raise ImportFailure(msg)
 
 	sccsfiles = []
 	done = 0
@@ -824,7 +884,7 @@ def Import(filenames, stdout):
 	for filename in filenames:
 		try:
 			imp.Progress(done, len(filenames))
-			if SccsFile.IsValidSccsFile(filename):
+			if IsValidSccsFile(filename):
 				sf = SccsFile(filename)
 				sccsfiles.append(sf)
 			else:
@@ -834,7 +894,7 @@ def Import(filenames, stdout):
 		except ImportFailure:
 			msg = ("\nAn import failure occurred while processing %s"
 			       % (filename,))
-			print >>sys.stderr, msg
+			print(msg, file=sys.stderr)
 			raise
 
 	imp.Progress(done, len(filenames))
@@ -844,12 +904,12 @@ def Import(filenames, stdout):
 	#
 	delta_list = []
 	for sfile in sccsfiles:
-		for delta in sfile._deltas:
+		for delta in sfile.deltas:
 			ts = "%020d" % (delta._timestamp,)
 			t = (ts, delta)
 			delta_list.append(t)
 
-	delta_list.sort()
+	delta_list.sort(key=itemgetter(0))
 
 	if stdout:
 		imp.SendToStdout()
@@ -894,31 +954,31 @@ def FindGitDir(gitdir, init):
 			try:
 				os.mkdir(gitdir)
 			except:
-				raise ImportFailure ("%s: Unable to create directory"
-						     % (gitdir,))
+				raise ImportFailure("%s: Unable to create directory"
+						    % (gitdir,))
 
 		if not gitdir.endswith("/.git"):
 			gitdir += "/.git"
 
 		if IsValidGitDir(gitdir):
-			raise ImportFailure, ("Git repository %s was already initialised"
-					      % (gitdir,))
+			raise ImportFailure("Git repository %s was already initialised"
+					    % (gitdir,))
 		else:
 			msg = ("Initializing repository: git --git-dir=%s init"
 			       % (gitdir,))
-			print >>sys.stderr, msg
+			print(msg, file=sys.stderr)
 			output = RunCommand(["git", "--git-dir=%s" % (gitdir,), "init"])
 			if output and verbose:
-				print >>sys.stderr, ("git init: %s" % (output,))
+				print(("git init: %s" % (output,)), file=sys.stderr)
 
 	if not IsValidGitDir(gitdir):
 		gitdir += "/.git"
 		if not IsValidGitDir(gitdir):
-			raise ImportFailure, ("cannot locate git repository at %s"
-					      % (gitdir,))
+			raise ImportFailure("cannot locate git repository at %s"
+					    % (gitdir,))
 
-	print >>sys.stderr, ("git repository: %s"
-			     % (gitdir,))
+	print(("git repository: %s"
+			     % (gitdir,)), file=sys.stderr)
 
 	return gitdir
 
@@ -936,8 +996,8 @@ def MakeDirWorklist(dirs):
 						result.append(physpath)
 
 	if not result:
-		print >>sys.stderr, ("Warning: No SCCS files were found in %s"
-				     % (" ".join(dirs)))
+		print(("Warning: No SCCS files were found in %s"
+				     % (" ".join(dirs))), file=sys.stderr)
 	return result
 
 
@@ -1003,13 +1063,13 @@ def GetUserInfo(login_name, mail_domain, tz):
 		gecos = pwd.getpwnam(login_name).pw_gecos
 	except:
 		if verbose:
-			print >>sys.stderr, ("%s: unknown login" % (login_name,))
+			print(("%s: unknown login" % (login_name,)), file=sys.stderr)
 
 		return UserInfo(login_name,
 				GitUser(login_name, login_name, mail_domain),
 				tz)
 	username = gecos.split(",")[0]
-	string.replace(username, "&", string.capitalize(login_name))
+	username.replace("&", login_name.capitalize())
 	return UserInfo(login_name, GitUser(username, login_name, mail_domain), tz)
 
 def ParseOptions(argv):
@@ -1142,7 +1202,7 @@ def main(argv):
 
 	try:
 		options, args = ParseOptions(argv)
-		#print >>sys.stderr, ("Positional args:", " ".join(args))
+		#print(("Positional args:", " ".join(args)), file=sys.stderr)
 		args = args[1:]
 		if not args:
 			if options.dirs:
@@ -1158,13 +1218,13 @@ def main(argv):
 			try:
 				GitDir = FindGitDir(options.git_dir, options.init)
 				os.environ["GIT_DIR"] = GitDir
-			except ImportFailure, init_failure:
+			except ImportFailure(init_failure):
 				if options.init:
 					action = "Initialisation"
 				else:
 					action = "Locate"
 
-				print >>sys.stderr, ("%s failed:\n%s" % (action, init_failure,))
+				print(("%s failed:\n%s" % (action, init_failure,)), file=sys.stderr)
 				return 1
 
 		if options.dirs:
@@ -1173,20 +1233,20 @@ def main(argv):
 			items = args
 
 		if len(items) <= 0:
-			print >>sys.stderr, "No items to import!"
+			print("No items to import!", file=sys.stderr)
 			return 1
 
 		if debug:
-			print >>sys.stderr, ("Importing %d items:" % (len(items),), " ".join(items))
+			print(("Importing %d items:" % (len(items),), " ".join(items)), file=sys.stderr)
 		else:
-			print >>sys.stderr, ("Importing %d items..." % (len(items),))
+			print(("Importing %d items..." % (len(items),)), file=sys.stderr)
 
 		return Import(items, options.stdout)
 
-	except UsageError, usage_err:
-		return Usage(progname, 1, sys.stderr, usage_err)
-	except ImportFailure, imp_failure:
-		print >>sys.stderr, ("Import failed: %s" % (imp_failure,))
+	except UsageError as usage_err:
+		return Usage(progname, 2, sys.stderr, usage_err)
+	except ImportFailure as imp_failure:
+		print(("Import failed: %s" % (imp_failure,)), file=sys.stderr)
 		return 1
 
 def using(point=""):
@@ -1195,7 +1255,7 @@ def using(point=""):
 
 if __name__ == '__main__':
 	rc = main(sys.argv)
-	print >>sys.stderr, using(progname)
+	print(using(progname), file=sys.stderr)
 	sys.exit(rc)
 
 # Local Variables:
