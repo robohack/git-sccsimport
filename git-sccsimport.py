@@ -474,7 +474,18 @@ class Delta(object):
 		self._seqno = int(self._seqno)
 		self._parent_seqno = int(self._parent_seqno)
 		if self._comment == "\n":
-			self._comment = None
+			self._comment = self._cmp_comment = None
+		elif self._parent_seqno == 0:	# Only for file creation delta
+			# Remove the variable part (the date/time) from a default file
+			# creation comment when used for fuzzy comparison,
+			# and replace with SCCS_ESCAPE as a sentinal unlikely to appear in
+			# real comments. This allows consecutive creations to be folded into
+			# one git commit in the same way as other comments.
+			self._cmp_comment = re.sub(
+			 r"^date and time created \d\d/\d\d/\d\d \d\d:\d\d:\d\d by ",
+			 '\x01', self._comment, flags=re.ASCII)
+		else:
+			self._cmp_comment = self._comment
 
 		assert sidcheck==self._sid
 		self._mrs = mrlist.split()
@@ -483,18 +494,13 @@ class Delta(object):
 	def SameFuzzyCommit(self, other):
 		#print(("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
 		#		     % (self, other)), file=sys.stderr)
-		if self._comment != other._comment:
-			return False
-		elif self._committer != other._committer:
-			return False
-		elif self._mrs != other._mrs:
-			return False
-		else:
-			delta = abs(other._timestamp - self._timestamp)
-			if delta > FUZZY_WINDOW or self._comment == "":
-				return False
-			else:
-				return True
+		return (
+			self._comment != "" and
+			self._cmp_comment == other._cmp_comment and
+			self._committer == other._committer and
+			self._mrs == other._mrs and
+			abs(other._timestamp - self._timestamp) <= FUZZY_WINDOW
+		)
 
 	def SetTimestamp(self, checkin_date, checkin_time):
 		try:
