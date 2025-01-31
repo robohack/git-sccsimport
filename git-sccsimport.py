@@ -131,7 +131,7 @@ import string
 import subprocess
 import sys
 
-from operator import itemgetter
+from operator import attrgetter
 
 SCCS_ESCAPE = ord(b'\x01')	# <CTRL-A>
 
@@ -833,7 +833,7 @@ def ImportDeltas(imp, deltas):
 				imp.CompleteCommit()
 				first_delta_in_commit = None
 				if DoTags and write_tag_next:
-					imp.WriteTag(plevel, current - 1)
+					imp.WriteTag(plevel, parent - 1)
 					write_tag_next = False
 
 				if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
@@ -841,9 +841,8 @@ def ImportDeltas(imp, deltas):
 
 		if first_delta_in_commit is None:
 			first_delta_in_commit = d
-			current = imp.BeginCommit(d, parent)
+			parent = imp.BeginCommit(d, parent)
 			commit_count += 1
-			parent = current
 			if pdelta:
 				plevel = d
 
@@ -901,14 +900,8 @@ def Import(filenames, stdout):
 	# Now we have all the metadata; sort the deltas by timestamp
 	# and import the deltas in time order.
 	#
-	delta_list = []
-	for sfile in sccsfiles:
-		for delta in sfile.deltas:
-			ts = "%020d" % (delta._timestamp,)
-			t = (ts, delta)
-			delta_list.append(t)
-
-	delta_list.sort(key=itemgetter(0))
+	delta_list = [delta for sfile in sccsfiles for delta in sfile.deltas]
+	delta_list.sort(key=attrgetter('_timestamp'))
 
 	if stdout:
 		imp.SendToStdout()
@@ -916,7 +909,7 @@ def Import(filenames, stdout):
 		imp.StartImporter()
 
 	try:
-		ImportDeltas(imp, [d[1] for d in delta_list])
+		ImportDeltas(imp, delta_list)
 	finally:
 		imp.Done()
 
