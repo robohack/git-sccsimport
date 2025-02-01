@@ -1112,7 +1112,7 @@ def ParseOptions(argv):
 			  help=("set the date SCCS files moved between timezones"
 				" (in ISO8601 form: YYYY/MM/DDTHH:MM:SS)"))
 	parser.add_option("--move-zone",
-			  help=("set the new timezone after --move-date"))
+			  help=("Set the new timezone after --move-date"))
 	parser.add_option("--no-tags", default=False, action="store_true",
 			  help="Don't try to create tags on SID level bumps.")
 	parser.add_option("--stdout", default=False, action="store_true",
