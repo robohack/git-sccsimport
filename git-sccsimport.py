@@ -158,6 +158,7 @@ debug = False
 verbose = False
 
 DoTags = True
+DoCombineCreate = True
 
 class ImportFailure(Exception):
 	pass
@@ -475,7 +476,7 @@ class Delta(object):
 		self._parent_seqno = int(self._parent_seqno)
 		if self._comment == "\n":
 			self._comment = self._cmp_comment = None
-		elif self._parent_seqno == 0:	# Only for file creation delta
+		elif DoCombineCreate and self._parent_seqno == 0:	# Only for file creation delta
 			# Remove the variable part (the date/time) from a default file
 			# creation comment when used for fuzzy comparison,
 			# and replace with SCCS_ESCAPE as a sentinal unlikely to appear in
@@ -1087,6 +1088,7 @@ def ParseOptions(argv):
 	global MoveDate
 	global MoveOffset
 	global DoTags
+	global DoCombineCreate
 	global verbose
 	global AuthorMap
 
@@ -1125,6 +1127,8 @@ def ParseOptions(argv):
 	parser.add_option("--move-offset",
 			  help=("set the number of hours between timezones for"
 				" --move-date, old to new"))
+	parser.add_option("--no-combine-create", default=False, action="store_true",
+			  help="Don't combine file create deltas with date-divergent comments.")
 	parser.add_option("--no-tags", default=False, action="store_true",
 			  help="Don't try to create tags on SID level bumps.")
 	parser.add_option("--stdout", default=False, action="store_true",
@@ -1174,12 +1178,16 @@ def ParseOptions(argv):
 	if options.authormap:
 		AuthorMap = GetAuthorMap(options.authormap)
 
+	if options.no_combine_create:
+		DoCombineCreate = False
+
 	try:
 		FUZZY_WINDOW = float(options.fuzzy_commit_window)
 	except ValueError:
 		raise UsageError("The argument for the --fuzzy-commit-window option "
 				 "should be a number, but you specified '%s'"
 				 % (options.fuzzy_commit_window,))
+
 	IMPORT_REF = "refs/heads/%s" % (options.branch,)
 	return options, args
 
