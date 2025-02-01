@@ -833,7 +833,7 @@ def ImportDeltas(imp, deltas):
 				imp.CompleteCommit()
 				first_delta_in_commit = None
 				if DoTags and write_tag_next:
-					imp.WriteTag(plevel, parent - 1)
+					imp.WriteTag(plevel, current - 1)
 					write_tag_next = False
 
 				if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
@@ -841,8 +841,9 @@ def ImportDeltas(imp, deltas):
 
 		if first_delta_in_commit is None:
 			first_delta_in_commit = d
-			parent = imp.BeginCommit(d, parent)
+			current = imp.BeginCommit(d, parent)
 			commit_count += 1
+			parent = current
 			if pdelta:
 				plevel = d
 
