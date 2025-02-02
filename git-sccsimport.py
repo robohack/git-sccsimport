@@ -28,8 +28,6 @@
 #
 # ToDo:
 #
-# - add controls and defaults for timezones
-#
 # - fix the calling conventions (command-line API) to be more like:
 #
 #	mkdir my-project-converted-to-git
@@ -1005,8 +1003,8 @@ def GetTimezone(tz):
 
 # The author map should match the format of git-cvsimport:
 #
-# XXX currently the [time/zone] option requires the ISO8601 basic format,
-# i.e. "[+-]hhmm", e.g. "-0800".
+# The [time/zone] option requires either the ISO8601 basic format,
+# i.e. "[+-]hhmm", e.g. "-0800", or a tzinfo named zone.
 #
 # <username>=[Full Name] <email@addre.ss> <zone offset or name>
 #
