@@ -1147,7 +1147,7 @@ def ParseOptions(argv):
 	parser.add_option("--authormap",
 			  help="File mapping author user-IDs to Git style user.{name,email}")
 	parser.add_option("--commit-date-earliest", default=False, action="store_true",
-			  help="Commits have timestamp of earliest delta, not (default) latest.")
+			  help="Commits have timestamp of earliest delta, not (default) latest")
 	parser.add_option("--dirs",
 			  action="store_true",
 			  help=("Command-line arguments are a list "
@@ -1170,11 +1170,11 @@ def ParseOptions(argv):
 			  help=("set the number of hours between timezones for"
 				" --move-date, old to new"))
 	parser.add_option("--no-combine-create", default=False, action="store_true",
-			  help="Don't combine file create deltas with date-divergent comments.")
+			  help="Don't combine file create deltas with date-divergent comments")
 	parser.add_option("--no-combine-separate", default=False, action="store_true",
-			  help="Don't combine similar deltas not contiguous in time.")
+			  help="Don't combine similar deltas not contiguous in time")
 	parser.add_option("--no-tags", default=False, action="store_true",
-			  help="Don't try to create tags on SID level bumps.")
+			  help="Don't try to create tags on SID level bumps")
 	parser.add_option("--stdout", default=False, action="store_true",
 			  help=("Send git-fast-import data to stdout "
 				"rather than to git-fast-import"))
@@ -1182,9 +1182,9 @@ def ParseOptions(argv):
 			  help=("Use the 'sccs' front-end for SCCS commands"
 				" (by default need for 'sccs' is auto-detected)"))
 	parser.add_option("--debug", default=False, action="store_true",
-			  help="Print all commands being run and any stderr output.")
+			  help="Print all commands being run and any stderr output")
 	parser.add_option("--verbose", default=False, action="store_true",
-			  help="Print more verbose status messages.")
+			  help="Print more verbose status messages")
 
 	(options, args) = parser.parse_args(argv)
 
