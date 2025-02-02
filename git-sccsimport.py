@@ -743,7 +743,7 @@ class GitImporter(object):
 		msg = "\r %3.0f%% (%d/%d)%s" % (percent, done, items, tail,)
 		self.ProgressMsg(msg)
 
-	def BeginCommit(self, delta_first, delta_last, parent):
+	def BeginCommit(self, delta, parent):
 		"""Start a new commit (having the indicated parent)."""
 		mark = self.GetNextMark()
 		self.Write("commit %s\nmark :%d\n" % (IMPORT_REF, mark,))
@@ -759,17 +759,14 @@ class GitImporter(object):
 		# --contains a965bb31" tells me this will be v2.21.0 or newer:
 		#
 		if tuple(GitVer.split(".")) >= tuple("2.21.0".split(".")):
-			# Use sid/seqno of the first delta of the group, not the last, to
-			# be sure they're monotonically increasing
 			self.Write("original-oid %s-%s-%s\n"
-				   % (delta_first._sccsfile._filename, delta_first._sid, delta_first._seqno))
+				   % (delta._sccsfile._filename, delta._sid, delta._seqno))
 
-		# If --commit-date-earliest, then delta_last may actually be the same as delta_first
-		ts = delta_last.GitTimestamp()
+		ts = delta.GitTimestamp()
 		self.Write("committer %s %s\n"
-			   % (delta_last._ui.email, ts))
+			   % (delta._ui.email, ts))
 
-		self.WriteData(delta_last.GitComment())
+		self.WriteData(delta.GitComment())
 		if parent:
 			self.Write("from :%d\n" % (parent,))
 
@@ -823,60 +820,82 @@ class GitImporter(object):
 def ImportDeltas(imp, deltas):
 	if not deltas:
 		raise ImportFailure("No deltas to import")
-	commit_begun = False
+
+	# Take a first pass through to group together deltas in the list within
+	# a FUZZY_WINDOW time that pass the matching tests. Each group then becomes
+	# a git commit.
+	first_didx = didx = 0
+	end_matching_didx = 1
+	while didx < len(deltas): # We can't iterate with for because didx gets moved
+		# didx is the potential last delta in a group, so we're checking it
+		# against the one after. First, in_win is whether we've reached the end
+		# of our time window.
+		in_win = didx < len(deltas) - 1 and \
+		 deltas[didx + 1]._timestamp - deltas[first_didx]._timestamp < FUZZY_WINDOW
+		# Test if the next delta fuzzy-matches the commit group, and also verify
+		# it isn't from an SCCS file already in this group (sometimes two deltas
+		# of the same file have exactly the same comment).
+		if (in_win and deltas[first_didx].SameFuzzyCommit(deltas[didx + 1]) and
+		 not any(d._sccsfile is deltas[didx + 1]._sccsfile
+		 for d in deltas[first_didx:end_matching_didx])):
+			# If necessary, hoist this commit up to be adjacent to
+			# other commits that pass the fuzzy match
+			didx += 1
+			if end_matching_didx != didx:
+				deltas.insert(end_matching_didx, deltas.pop(didx))
+			end_matching_didx += 1	# Delta has been added to the group
+		elif not in_win or not DoCombineSeparate:
+			# Mark this commit group as finished and reset loop to start new group
+			for d_grp in deltas[first_didx:end_matching_didx]:
+				d_grp._last_delta = deltas[end_matching_didx - 1]
+			deltas[first_didx]._first_marker = True
+			first_didx = didx = end_matching_didx
+			end_matching_didx = didx + 1
+		else:	# in_win and DoCombineSeparate and not fuzzy match
+			# We're still in the window, but skip this non-matching delta
+			didx += 1
+
+	# If deltas got moved to be together to combine them, and we're using the
+	# last delta date for the git commit, the commit dates could end up
+	# non-monotonic, so sort again to re-order the commits. Otherwise, this
+	# isn't necessary (and would be wrong for CommitDateEarliest if combining).
+	# Python's stable sort guarantees that commits, which might happen to share
+	# same-date sort keys, won't get mixed or jumbled.
+	if DoCombineSeparate and not CommitDateEarliest:
+		deltas.sort(key=attrgetter('_last_delta._timestamp'))
+
 	done = 0
 	imp.ProgressMsg("\nCreating commits...\n")
+	commit_begun = False
 	plevel = None
 	parent = None
 	pdelta = None
 	commit_count = 0
 	write_tag_next = False
-	next_divergent_didx = 0
-	for didx in range(len(deltas)):
+	for d in deltas:
 		imp.Progress(done, len(deltas))
 		done += 1
-		d = deltas[didx]
-		if didx == next_divergent_didx:
-			# Look ahead within FUZZY_WINDOW time to find matching deltas, and
-			# group them together in the list so that they may all be part of
-			# one git commit.
-			next_divergent_didx += 1
-			for didx_same in range(next_divergent_didx, len(deltas)):
-				if deltas[didx_same]._timestamp - d._timestamp > FUZZY_WINDOW:
-					break
-				if d.SameFuzzyCommit(deltas[didx_same]):
-					# If necessary, hoist this commit up to be adjacent to
-					# other commits that pass the fuzzy match
-					if next_divergent_didx != didx_same:
-						deltas.insert(next_divergent_didx, deltas.pop(didx_same))
-					next_divergent_didx += 1
-				elif not DoCombineSeparate:
-					# If --no-combine-separate is set, the first mismatch ends
-					# the group
-					break
+		# Figure out if we need to start a new commit
+		if commit_begun and getattr(d, '_first_marker', False):
+			imp.CompleteCommit()
+			commit_begun = False
+			if DoTags and write_tag_next:
+				imp.WriteTag(plevel, parent - 1)
+				write_tag_next = False
 
-			# Figure out if we need to start a new commit.
-			if commit_begun:
-				imp.CompleteCommit()
-				commit_begun = False
-				if DoTags and write_tag_next:
-					imp.WriteTag(plevel, parent - 1)
-					write_tag_next = False
-
-				if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
-					write_tag_next = True
+			if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
+				write_tag_next = True
 
 		if not commit_begun:
 			commit_begun = True
-			parent = imp.BeginCommit(d,
-			 d if CommitDateEarliest else deltas[next_divergent_didx - 1], parent)
+			parent = imp.BeginCommit(d if CommitDateEarliest else d._last_delta, parent)
 			commit_count += 1
 			if pdelta:
 				plevel = d
 
 		pdelta = d
 
-		# We're now in a commit.  Emit the body for this delta.
+		# We're now in a commit, so emit the body for this delta.
 		body = GetBody(d._sccsfile._filename, d._seqno, EXPAND_KEYWORDS)
 		if len(body) == 0:
 			imp.Filedelete(d._sccsfile)
@@ -1138,7 +1157,7 @@ def ParseOptions(argv):
 			  help="Expand keywords")
 	parser.add_option("--fuzzy-commit-window",
 			  default=FUZZY_WINDOW,
-			  help=("Deltas more than this many seconds apart "
+			  help=("Deltas this many seconds apart or more "
 				"are always considered to be in different commits"))
 	parser.add_option("--git-dir",
 			  help="Directory containing the git repository")
