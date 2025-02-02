@@ -48,10 +48,6 @@
 #   - perhaps we could just commit branch deltas to "br-<filename>-R.L.B" refs
 #     (which are created with a "reset" section)?
 #
-# - fuzzy commit comparison would work better if delta sorting was smarter,
-#   e.g. if it could do some kind of "sliding window sort" on the comment text
-#   over a group of commits.
-#
 # - can the SCCS "descriptive text" (:FD:) be used and useful in Git? (store it
 #   in a special attribute?)
 #
@@ -149,7 +145,7 @@ IMPORT_REF = None
 
 # Two checkins separated by more than FUZZY_WINDOW will never be considered part
 # of the same commit; N.B. even if they have the same non-empty comment,
-# commiter, and MRs.  (I.e. this can be a relatively large number, e.g. 1 day,
+# committer, and MRs.  (I.e. this can be a relatively large number, e.g. 1 day,
 # or even potentially a much longer time, such as a week.)
 FUZZY_WINDOW = 24.0 * 60.0 * 60.0 * 7.0
 
@@ -158,6 +154,9 @@ debug = False
 verbose = False
 
 DoTags = True
+DoCombineCreate = True
+DoCombineSeparate = True
+CommitDateEarliest = False
 
 class ImportFailure(Exception):
 	pass
@@ -474,7 +473,18 @@ class Delta(object):
 		self._seqno = int(self._seqno)
 		self._parent_seqno = int(self._parent_seqno)
 		if self._comment == "\n":
-			self._comment = None
+			self._comment = self._cmp_comment = None
+		elif DoCombineCreate and self._parent_seqno == 0:	# Only for file creation delta
+			# Remove the variable part (the date/time) from a default file
+			# creation comment when used for fuzzy comparison,
+			# and replace with SCCS_ESCAPE as a sentinal unlikely to appear in
+			# real comments. This allows consecutive creations to be folded into
+			# one git commit in the same way as other comments.
+			self._cmp_comment = re.sub(
+			 r"^date and time created \d\d/\d\d/\d\d \d\d:\d\d:\d\d by ",
+			 '\x01', self._comment, flags=re.ASCII)
+		else:
+			self._cmp_comment = self._comment
 
 		assert sidcheck==self._sid
 		self._mrs = mrlist.split()
@@ -483,18 +493,12 @@ class Delta(object):
 	def SameFuzzyCommit(self, other):
 		#print(("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
 		#		     % (self, other)), file=sys.stderr)
-		if self._comment != other._comment:
-			return False
-		elif self._committer != other._committer:
-			return False
-		elif self._mrs != other._mrs:
-			return False
-		else:
-			delta = abs(other._timestamp - self._timestamp)
-			if delta > FUZZY_WINDOW or self._comment == "":
-				return False
-			else:
-				return True
+		return (
+			self._comment != "" and
+			self._cmp_comment == other._cmp_comment and
+			self._committer == other._committer and
+			self._mrs == other._mrs
+		)
 
 	def SetTimestamp(self, checkin_date, checkin_time):
 		try:
@@ -808,18 +812,61 @@ class GitImporter(object):
 		"""Write the final part of a commit."""
 		self.Write("\n")
 
-
-# TODO: if the fuzzy commit logic puts subsequent deltas into the same
-# commit, the timestamp of the commit is that of the first delta.
-# One could argue that the timestamp of the last one would be a better choice.
-
+# If the fuzzy commit logic puts subsequent deltas into the same
+# commit, the timestamp of the commit is that of the last delta, by default.
+# The --commit-date-earliest option instead uses the timestamp of the first
+# delta, matching previous behavior of this program.
 
 def ImportDeltas(imp, deltas):
 	if not deltas:
 		raise ImportFailure("No deltas to import")
-	first_delta_in_commit = None
+
+	# Take a first pass through to group together deltas in the list within
+	# a FUZZY_WINDOW time that pass the matching tests. Each group then becomes
+	# a git commit.
+	first_didx = didx = 0
+	end_matching_didx = 1
+	while didx < len(deltas): # We can't iterate with for because didx gets moved
+		# didx is the potential last delta in a group, so we're checking it
+		# against the one after. First, in_win is whether we've reached the end
+		# of our time window.
+		in_win = didx < len(deltas) - 1 and \
+		 deltas[didx + 1]._timestamp - deltas[first_didx]._timestamp < FUZZY_WINDOW
+		# Test if the next delta fuzzy-matches the commit group, and also verify
+		# it isn't from an SCCS file already in this group (sometimes two deltas
+		# of the same file have exactly the same comment).
+		if (in_win and deltas[first_didx].SameFuzzyCommit(deltas[didx + 1]) and
+		 not any(d._sccsfile is deltas[didx + 1]._sccsfile
+		 for d in deltas[first_didx:end_matching_didx])):
+			# If necessary, hoist this commit up to be adjacent to
+			# other commits that pass the fuzzy match
+			didx += 1
+			if end_matching_didx != didx:
+				deltas.insert(end_matching_didx, deltas.pop(didx))
+			end_matching_didx += 1	# Delta has been added to the group
+		elif not in_win or not DoCombineSeparate:
+			# Mark this commit group as finished and reset loop to start new group
+			for d_grp in deltas[first_didx:end_matching_didx]:
+				d_grp._last_delta = deltas[end_matching_didx - 1]
+			deltas[first_didx]._first_marker = True
+			first_didx = didx = end_matching_didx
+			end_matching_didx = didx + 1
+		else:	# in_win and DoCombineSeparate and not fuzzy match
+			# We're still in the window, but skip this non-matching delta
+			didx += 1
+
+	# If deltas got moved to be together to combine them, and we're using the
+	# last delta date for the git commit, the commit dates could end up
+	# non-monotonic, so sort again to re-order the commits. Otherwise, this
+	# isn't necessary (and would be wrong for CommitDateEarliest if combining).
+	# Python's stable sort guarantees that commits, which might happen to share
+	# same-date sort keys, won't get mixed or jumbled.
+	if DoCombineSeparate and not CommitDateEarliest:
+		deltas.sort(key=attrgetter('_last_delta._timestamp'))
+
 	done = 0
 	imp.ProgressMsg("\nCreating commits...\n")
+	commit_begun = False
 	plevel = None
 	parent = None
 	pdelta = None
@@ -828,29 +875,27 @@ def ImportDeltas(imp, deltas):
 	for d in deltas:
 		imp.Progress(done, len(deltas))
 		done += 1
-		# Figure out if we need to start a new commit.
-		if first_delta_in_commit:
-			if not first_delta_in_commit.SameFuzzyCommit(d):
-				imp.CompleteCommit()
-				first_delta_in_commit = None
-				if DoTags and write_tag_next:
-					imp.WriteTag(plevel, current - 1)
-					write_tag_next = False
+		# Figure out if we need to start a new commit
+		if commit_begun and getattr(d, '_first_marker', False):
+			imp.CompleteCommit()
+			commit_begun = False
+			if DoTags and write_tag_next:
+				imp.WriteTag(plevel, parent - 1)
+				write_tag_next = False
 
-				if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
-					write_tag_next = True
+			if plevel and d.SidLevel() > plevel.SidLevel() and d.SidRev() == 1:
+				write_tag_next = True
 
-		if first_delta_in_commit is None:
-			first_delta_in_commit = d
-			current = imp.BeginCommit(d, parent)
+		if not commit_begun:
+			commit_begun = True
+			parent = imp.BeginCommit(d if CommitDateEarliest else d._last_delta, parent)
 			commit_count += 1
-			parent = current
 			if pdelta:
 				plevel = d
 
 		pdelta = d
 
-		# We're now in a commit.  Emit the body for this delta.
+		# We're now in a commit, so emit the body for this delta.
 		body = GetBody(d._sccsfile._filename, d._seqno, EXPAND_KEYWORDS)
 		if len(body) == 0:
 			imp.Filedelete(d._sccsfile)
@@ -1081,6 +1126,9 @@ def ParseOptions(argv):
 	global MoveDate
 	global MoveOffset
 	global DoTags
+	global DoCombineCreate
+	global DoCombineSeparate
+	global CommitDateEarliest
 	global verbose
 	global AuthorMap
 
@@ -1090,7 +1138,7 @@ def ParseOptions(argv):
 
 	parser = optparse.OptionParser()
 	parser.add_option("--branch",
-			  help="branch to populate",
+			  help="Branch to populate",
 			  default="master")
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
@@ -1098,6 +1146,8 @@ def ParseOptions(argv):
 			  help="Default UTC offset for timestamps (default: %s)" % (DEFAULT_USER_TZ,))
 	parser.add_option("--authormap",
 			  help="File mapping author user-IDs to Git style user.{name,email}")
+	parser.add_option("--commit-date-earliest", default=False, action="store_true",
+			  help="Commits have timestamp of earliest delta, not (default) latest")
 	parser.add_option("--dirs",
 			  action="store_true",
 			  help=("Command-line arguments are a list "
@@ -1107,20 +1157,24 @@ def ParseOptions(argv):
 			  help="Expand keywords")
 	parser.add_option("--fuzzy-commit-window",
 			  default=FUZZY_WINDOW,
-			  help=("Deltas more than this many seconds apart "
+			  help=("Deltas this many seconds apart or more "
 				"are always considered to be in different commits"))
 	parser.add_option("--git-dir",
 			  help="Directory containing the git repository")
 	parser.add_option("--init", default=False, action="store_true",
 			  help="Initialise the git repository first")
 	parser.add_option("--move-date",
-			  help=("set the date SCCS files moved between timezones"
+			  help=("Set the date SCCS files moved between timezones"
 				" (in ISO8601 form: YYYY/MM/DDTHH:MM:SS)"))
 	parser.add_option("--move-offset",
 			  help=("set the number of hours between timezones for"
 				" --move-date, old to new"))
+	parser.add_option("--no-combine-create", default=False, action="store_true",
+			  help="Don't combine file create deltas with date-divergent comments")
+	parser.add_option("--no-combine-separate", default=False, action="store_true",
+			  help="Don't combine similar deltas not contiguous in time")
 	parser.add_option("--no-tags", default=False, action="store_true",
-			  help="Don't try to create tags on SID level bumps.")
+			  help="Don't try to create tags on SID level bumps")
 	parser.add_option("--stdout", default=False, action="store_true",
 			  help=("Send git-fast-import data to stdout "
 				"rather than to git-fast-import"))
@@ -1128,9 +1182,9 @@ def ParseOptions(argv):
 			  help=("Use the 'sccs' front-end for SCCS commands"
 				" (by default need for 'sccs' is auto-detected)"))
 	parser.add_option("--debug", default=False, action="store_true",
-			  help="Print all commands being run and any stderr output.")
+			  help="Print all commands being run and any stderr output")
 	parser.add_option("--verbose", default=False, action="store_true",
-			  help="Print more verbose status messages.")
+			  help="Print more verbose status messages")
 
 	(options, args) = parser.parse_args(argv)
 
@@ -1168,12 +1222,22 @@ def ParseOptions(argv):
 	if options.authormap:
 		AuthorMap = GetAuthorMap(options.authormap)
 
+	if options.no_combine_create:
+		DoCombineCreate = False
+
+	if options.no_combine_separate:
+		DoCombineSeparate = False
+
+	if options.commit_date_earliest:
+		CommitDateEarliest = True
+
 	try:
 		FUZZY_WINDOW = float(options.fuzzy_commit_window)
 	except ValueError:
 		raise UsageError("The argument for the --fuzzy-commit-window option "
 				 "should be a number, but you specified '%s'"
 				 % (options.fuzzy_commit_window,))
+
 	IMPORT_REF = "refs/heads/%s" % (options.branch,)
 	return options, args
 
