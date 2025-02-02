@@ -28,8 +28,6 @@
 #
 # ToDo:
 #
-# - add controls and defaults for timezones
-#
 # - fix the calling conventions (command-line API) to be more like:
 #
 #	mkdir my-project-converted-to-git
@@ -117,7 +115,8 @@ fast (direct header parsing) method it completed in just under 18 minutes (on an
 8 vCPU, 22GB, Xen VM on Dell PE2950 with Intel Xeon E5440 CPUs @ 2.83GHz).
 
 """
-import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import errno
 import optparse
 import os
@@ -129,9 +128,8 @@ import stat
 import string
 import subprocess
 import sys
-import time
 
-from operator import itemgetter
+from operator import attrgetter
 
 SCCS_ESCAPE = ord(b'\x01')	# <CTRL-A>
 
@@ -139,11 +137,8 @@ SCCS_ESCAPE = ord(b'\x01')	# <CTRL-A>
 #
 MAIL_DOMAIN = None
 
-DEFAULT_USER_TZ = "+0000"
+DEFAULT_USER_TZ = None	# Default to local time zone
 
-UNIX_EPOCH = time.mktime(datetime.datetime(1970, 1, 1,
-					   0, 0, 0, 0,
-					   None).timetuple())
 IMPORT_REF = None
 
 
@@ -467,9 +462,10 @@ class Delta(object):
 		props = self._qif.FetchDeltaProperties(self._sid,
 						       self._sccsfile)
 		assert len(props)>1, "%s %s %s" % (self._sccsfile._filename, self._sid, props,)
-		self.SetTimestamp(props[0], props[1])
 		(self._comment, self._seqno, self._parent_seqno, self._type,
 		 sidcheck, mrlist, self._committer) = props[2:]
+		self._ui = GetUserInfo(self._committer, MAIL_DOMAIN, DEFAULT_USER_TZ)
+		self.SetTimestamp(props[0], props[1])
 		#print(("DeltaProperties: %s" % (self)), file=sys.stderr)
 		self._seqno = int(self._seqno)
 		self._parent_seqno = int(self._parent_seqno)
@@ -478,7 +474,6 @@ class Delta(object):
 
 		assert sidcheck==self._sid
 		self._mrs = mrlist.split()
-		self._ui = GetUserInfo(self._committer, MAIL_DOMAIN, DEFAULT_USER_TZ)
 
 	def SameFuzzyCommit(self, other):
 		#print(("SameFuzzyCommit: comparing\n1: %s with\n2: %s"
@@ -517,53 +512,55 @@ class Delta(object):
 			else:
 				year += 1900
 
-		cdate = datetime.datetime(year, month, monthday,
-					  h, m, s,
-					  microsec, None)
-		lt = time.mktime(cdate.timetuple())
-		#
-		# XXX the timzone currently defaults to the host's timezone
+		# The timezone currently defaults to the host's timezone
 		# (i.e. assuming the import is being done on a machine in the
-		# same timezone as the original SCCS source server lived)
+		# same timezone as the original SCCS source server lived),
+		# but this can be overridden with the --tz option.
 		#
-		# With the addition of the AuthorMap file ala git-sccsimport
-		# then we could also adjust timestamps on a per-author basis,
-		# though that would also probably require use of the magical
-		# third-party "pytz" module.
+		# With the addition of the AuthorMap file we can also adjust
+		# timestamps on a per-author basis.
 		#
-		epoch_offset = time.mktime(time.gmtime(lt)) # convert to UTC
-		#
-		# Maybe there could also be some option to change the timezone
-		# at some date (or list of dates), in order to handle cases
-		# where the SCCS files moved location.  (mostly a special case
-		# for me, but perhaps others have moved between timezones too)
-		#
-		# On 2010/11/04 I arrived in Kelowna from Toronto, so since then
-		# local timestamps are three hours less than they were, so if
-		# the timestamp is from before that date, then add three hours.
-		#
-		if MoveDate is not None:
-			mvd = time.mktime(MoveDate.timetuple())
-			if lt < mvd:
-				lt += MoveOffset
+		tz = self._ui.tz or DEFAULT_USER_TZ
 
-		# We subtract UNIX_EPOCH to take account of the fact
-		# that the system epoch may in fact not be the same as the Unix
-		# epoch.
+		if tz:
+			# Treat the specified time as in the user-mapped zone or the
+			# zone specified via --tz.
+			cdate = datetime(year, month, monthday,
+						  h, m, s,
+						  microsec, tzinfo=tz)
+		else:
+			# Since the naive datetime is presumed local, and astimezone()
+			# would convert to local, the result is that the specified time
+			# is for the local system zone.
+			cdate = datetime(year, month, monthday,
+						  h, m, s,
+						  microsec, None).astimezone()
+
+		# Currently we can handle one "move", where the timezone changes at
+		# some point, through the --move-date and --move-zone options. A future
+		# version might allow a list of such moves, maybe read from a file or
+		# using repeated command-line options.
 		#
+		# Note that user-mapped timezones take precedence over MoveDate/MoveZone.
+		#
+		if self._ui.tz is None and MoveDate is not None and cdate >= MoveDate:
+			cdate = datetime(year, month, monthday,
+						  h, m, s,
+						  microsec, tzinfo=MoveZone)
+
 		# git fast-import requires the timestamp to be measured in
 		# seconds since the Unix epoch.
 		#
-		self._timestamp = epoch_offset - UNIX_EPOCH
+		self._timestamp = cdate.timestamp()
+		self._tz_offset = cdate.strftime("%z")
 
 	def GitTimestamp(self):
-		n = int(self._timestamp)
 		# We also pass timezone information from the AuthorMap (or local
 		# timezone) by setting the appropriate <offutc> value here.
 		# N.B. the timestamp must still be in UTC -- <offutc> is only
 		# used to advise formatting of timestamps in log reports and
 		# such.
-		return "%d %s" % (n, self._ui.tz,)
+		return "%d %s" % (self._timestamp, self._tz_offset,)
 
 	def GitComment(self):
 		"""Format a comment, noting any MRs as 'Issue' numbers"""
@@ -902,14 +899,8 @@ def Import(filenames, stdout):
 	# Now we have all the metadata; sort the deltas by timestamp
 	# and import the deltas in time order.
 	#
-	delta_list = []
-	for sfile in sccsfiles:
-		for delta in sfile.deltas:
-			ts = "%020d" % (delta._timestamp,)
-			t = (ts, delta)
-			delta_list.append(t)
-
-	delta_list.sort(key=itemgetter(0))
+	delta_list = [delta for sfile in sccsfiles for delta in sfile.deltas]
+	delta_list.sort(key=attrgetter('_timestamp'))
 
 	if stdout:
 		imp.SendToStdout()
@@ -917,7 +908,7 @@ def Import(filenames, stdout):
 		imp.StartImporter()
 
 	try:
-		ImportDeltas(imp, [d[1] for d in delta_list])
+		ImportDeltas(imp, delta_list)
 	finally:
 		imp.Done()
 
@@ -1001,17 +992,29 @@ def MakeDirWorklist(dirs):
 	return result
 
 
+def GetTimezone(tz):
+	if tz[0] == '+' or tz[0] == '-':
+		assert int(tz)
+		# Construct a timezone with a fixed offset from a string like "-0800"
+		return timezone(timedelta(hours=int(tz[:3]), minutes=int(tz[0] + tz[3:5])))
+	else:
+		# Otherwise, look up the tzinfo timezone by name (like "US/Pacific")
+		return ZoneInfo(tz)
+
 # The author map should match the format of git-cvsimport:
 #
-# XXX currently the [time/zone] option requires the ISO8601 basic format,
-# i.e. "[+-]hhmm", e.g. "-0800".
+# The [time/zone] option requires either the ISO8601 basic format,
+# i.e. "[+-]hhmm", e.g. "-0800", or a tzinfo named zone.
 #
-# <username>=Full Name <email@addre.ss> [time/zone]
+# <username>=[Full Name] <email@addre.ss> <zone offset or name>
+#
+# The email address must be surrounded by literal angle brackets
 #
 # e.g.:
 #
 #	exon=Andreas Ericsson <ae@op5.se>
 #	spawn=Simon Pawn <spawn@frog-pond.org> -0400
+#	bob=<bob@example.net> US/Pacific
 #
 # Comment lines, beginning with a '#', are ignored.
 #
@@ -1020,29 +1023,22 @@ class UserInfo():
 		self.login = login
 		self.email = email
 		self.tz = tz
+		#print(('UserInfo: "%s" "%s" "%s"' % (self.login,self.email,self.tz)), file=sys.stderr)
 
 def GetAuthorMap(filename):
 	map = {}
 	with open(filename, 'r') as fd:
-		for line in fd:
+		for line_no, line in enumerate(fd, 1):
 			if line[0] == '#':
 				continue
-			(k, v) = line.split('=')
-			v = v.strip()
-			if not v:
-				# ignore usernames with no info
-				continue
-			sp = v.rsplit(None, 1)
-			tz = DEFAULT_USER_TZ
-			if sp[-1].find('/') > -1:
-				tz = FindUTCOffset(sp[-1]) # XXX ToDo ???
-				v = sp[0]
-			elif sp[-1][0] == '+' or sp[-1][0] == '-':
-				assert int(sp[-1])
-				tz = sp[-1]
-				v = sp[0]
-
-			map[k.strip()] = UserInfo(k, v, tz)
+			m = re.fullmatch(r"\s*(?P<key>[^=\s]+)\s*=\s*(?:(?P<login>.*\S)\s+)?"
+			 r"(?P<email><[^<>\s]*>)\s*(?:(?<=\s)(?P<tz>[^\s]+)\s*)?", line)
+			if not m:
+				raise UsageError('Invalid syntax in author map at line %d: "%s"'
+				 % (line_no, line.rstrip('\n')))
+			map[m['key']] = UserInfo(m['key'],
+			 m['login'] + ' ' + m['email'] if m['login'] else m['email'],
+			 GetTimezone(m['tz']) if m['tz'] else None)
 
 	return map
 
@@ -1054,11 +1050,8 @@ def GitUser(username, login_name, mail_domain):
 
 def GetUserInfo(login_name, mail_domain, tz):
 	"""Get a user's info corresponding to the given login name."""
-	if AuthorMap:
-		return AuthorMap.get(login_name,
-				     UserInfo(login_name,
-					      GitUser(login_name, login_name, mail_domain),
-					      tz))
+	if AuthorMap and (am := AuthorMap.get(login_name)):
+		return am
 	try:
 		gecos = pwd.getpwnam(login_name).pw_gecos
 	except:
@@ -1079,14 +1072,14 @@ def ParseOptions(argv):
 	global EXPAND_KEYWORDS
 	global DEFAULT_USER_TZ
 	global MoveDate
-	global MoveOffset
+	global MoveZone
 	global DoTags
 	global verbose
 	global AuthorMap
 
 	AuthorMap = None
 	MoveDate = None
-	MoveOffset = None
+	MoveZone = None
 
 	parser = optparse.OptionParser()
 	parser.add_option("--branch",
@@ -1095,7 +1088,7 @@ def ParseOptions(argv):
 	parser.add_option("--maildomain",
 			  help="Mail domain for usernames taken from SCCS files")
 	parser.add_option("--tz",
-			  help="Default UTC offset for timestamps (default: %s)" % (DEFAULT_USER_TZ,))
+			  help="Default timezone name or UTC offset for timestamps (default local time)")
 	parser.add_option("--authormap",
 			  help="File mapping author user-IDs to Git style user.{name,email}")
 	parser.add_option("--dirs",
@@ -1116,9 +1109,8 @@ def ParseOptions(argv):
 	parser.add_option("--move-date",
 			  help=("set the date SCCS files moved between timezones"
 				" (in ISO8601 form: YYYY/MM/DDTHH:MM:SS)"))
-	parser.add_option("--move-offset",
-			  help=("set the number of hours between timezones for"
-				" --move-date, old to new"))
+	parser.add_option("--move-zone",
+			  help=("Set the new timezone after --move-date"))
 	parser.add_option("--no-tags", default=False, action="store_true",
 			  help="Don't try to create tags on SID level bumps.")
 	parser.add_option("--stdout", default=False, action="store_true",
@@ -1142,7 +1134,7 @@ def ParseOptions(argv):
 
 	if options.tz:
 		# xxx verify it is in the correct format!
-		DEFAULT_USER_TZ = options.tz
+		DEFAULT_USER_TZ = GetTimezone(options.tz)
 
 	if options.no_tags:
 		DoTags = False
@@ -1153,17 +1145,23 @@ def ParseOptions(argv):
 		VAL = "sccs val"
 
 	if options.move_date:
-		if not options.move_offset:
-			raise UsageError("--move-date requires --move-offset")
+		if not options.move_zone:
+			raise UsageError("--move-date requires --move-zone")
 		try:
-			MoveDate = datetime.datetime.strptime(options.move_date,
+			MoveDate = datetime.strptime(options.move_date,
 							      '%Y/%m/%dT%H:%M:%S')
+			# --move-date is specified in the pre-move zone
+			# Convert this to an aware datetime, either in local or --tz zone
+			if DEFAULT_USER_TZ is None:
+				MoveDate = MoveDate.astimezone()
+			else:
+				MoveDate = MoveDate.replace(tzinfo=DEFAULT_USER_TZ)
 		except:
 			raise UsageError("Bad --move-date")
 		try:
-			MoveOffset = float(options.move_offset) * 60.0 * 60.0
+			MoveZone = GetTimezone(options.move_zone)
 		except:
-			raise UsageError("Bad --move-offset")
+			raise UsageError("Bad --move-zone")
 
 	if options.authormap:
 		AuthorMap = GetAuthorMap(options.authormap)
